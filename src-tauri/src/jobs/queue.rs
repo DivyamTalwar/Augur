@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
@@ -123,6 +123,11 @@ impl Drop for JobGuard {
                 // Remove from active jobs
                 active_jobs.lock().await.remove(&job_id);
 
+                if db_job_is_terminal(&db_conn, &job_id) {
+                    crate::orchestration::cleanup_job_workspace(&app_handle, &job_id);
+                    return;
+                }
+
                 // Reset entity status if context provided
                 if let Some(ref ctx) = entity_context {
                     db_reset_entity_status(&db_conn, ctx, &app_handle);
@@ -145,6 +150,11 @@ impl Drop for JobGuard {
                 "[job_queue] No tokio runtime available for async cleanup of job_id={}",
                 self.job_id
             );
+
+            if db_job_is_terminal(&db_conn, &job_id) {
+                crate::orchestration::cleanup_job_workspace(&app_handle, &job_id);
+                return;
+            }
 
             // Reset entity status if context provided
             if let Some(ref ctx) = entity_context {
@@ -310,35 +320,6 @@ fn read_specialist_stream_updates(
     updates
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn specialist_stream_updates_are_incremental() {
-        let dir =
-            std::env::temp_dir().join(format!("augur-specialist-log-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("pain-diagnostician.stream.log");
-        let mut offsets = HashMap::new();
-
-        std::fs::write(&path, "first note\n").unwrap();
-        assert_eq!(
-            read_specialist_stream_updates(&dir, &mut offsets),
-            vec![("pain-diagnostician".to_string(), "first note".to_string())]
-        );
-
-        std::fs::write(&path, "first note\nsecond note\n").unwrap();
-        assert_eq!(
-            read_specialist_stream_updates(&dir, &mut offsets),
-            vec![("pain-diagnostician".to_string(), "second note".to_string())]
-        );
-        assert!(read_specialist_stream_updates(&dir, &mut offsets).is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
 pub struct JobQueue {
     semaphore: Arc<Semaphore>,
     active_jobs: Arc<Mutex<HashMap<String, ActiveJob>>>,
@@ -361,6 +342,7 @@ impl JobQueue {
     /// - Queue timeout (semaphore acquisition fails after 30s)
     /// - Job cancellation before running
     /// - Any error before job starts
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_job_with_callback<F>(
         &self,
         app: AppHandle,
@@ -610,10 +592,6 @@ impl JobQueue {
                 "--output-format".to_string(),
                 "stream-json".to_string(),
                 "--verbose".to_string(),
-                // This is a trusted local desktop workflow. Specialist `tools:` frontmatter
-                // guides Claude's subagent behavior but is not an OS-level sandbox while the
-                // parent Claude process is launched with skipped permission prompts.
-                "--dangerously-skip-permissions".to_string(),
             ];
 
             // Add --chrome flag if enabled in settings
@@ -627,15 +605,18 @@ impl JobQueue {
             args.push("--effort".to_string());
             args.push("xhigh".to_string());
 
-            // Add prompt at the end (positional argument)
+            // Add prompt after an argv delimiter so prompt text beginning with '-' is never parsed as a flag.
+            let prompt_len = prompt.len();
+            args.push("--".to_string());
             args.push(prompt);
 
-            // Debug: log the command being executed
+            // Debug without logging the prompt-bearing argv.
             eprintln!(
-                "[job_queue] job_id={} Executing: {} {}",
+                "[job_queue] job_id={} Executing: {} ({} args, prompt_bytes={})",
                 job_id_clone,
                 claude_path,
-                args.join(" ")
+                args.len(),
+                prompt_len
             );
 
             // Spawn the process with kill_on_drop for safety
@@ -783,11 +764,12 @@ impl JobQueue {
 
             if let Some((tail_stop_tx, specialist_tail_handle)) = specialist_tail {
                 let _ = tail_stop_tx.send(true);
-                if let Err(_) = tokio::time::timeout(
+                if tokio::time::timeout(
                     Duration::from_secs(STREAM_DRAIN_TIMEOUT_SECS),
                     specialist_tail_handle,
                 )
                 .await
+                .is_err()
                 {
                     eprintln!(
                         "[job_queue] job_id={} Specialist stream drain timeout",
@@ -797,22 +779,24 @@ impl JobQueue {
             }
 
             // Wait for stream tasks to complete with timeout to prevent hanging
-            if let Err(_) = tokio::time::timeout(
+            if tokio::time::timeout(
                 Duration::from_secs(STREAM_DRAIN_TIMEOUT_SECS),
                 stdout_handle,
             )
             .await
+            .is_err()
             {
                 eprintln!(
                     "[job_queue] job_id={} Stdout stream drain timeout",
                     job_id_clone
                 );
             }
-            if let Err(_) = tokio::time::timeout(
+            if tokio::time::timeout(
                 Duration::from_secs(STREAM_DRAIN_TIMEOUT_SECS),
                 stderr_handle,
             )
             .await
+            .is_err()
             {
                 eprintln!(
                     "[job_queue] job_id={} Stderr stream drain timeout",
@@ -823,29 +807,16 @@ impl JobQueue {
             // Finalize stream processor and get completion context
             let completion_ctx = stream_processor.finalize(result.2, result.1).await;
 
-            // Update job status in database
-            let error_msg = if !result.2 {
+            // Process completion atomically using CompletionHandler
+            let completion_handler = CompletionHandler::new(db_conn.clone(), app_clone.clone());
+            let mut final_status = result.0.clone();
+            let mut final_success = result.2;
+            let mut final_error_msg = if !result.2 {
                 Some(format!("Job {} with code {:?}", result.0, result.1))
             } else {
                 None
             };
-            update_job_status(&result.0, result.1, error_msg.as_deref());
 
-            // Send completion event
-            if let Err(e) = on_event.send(StreamEvent {
-                job_id: job_id_clone.clone(),
-                event_type: result.0.clone(),
-                content: format!("Job {} with code {:?}", result.0, result.1),
-                timestamp: chrono::Utc::now().timestamp_millis(),
-            }) {
-                eprintln!(
-                    "[job_queue] job_id={} Failed to send completion event: {}",
-                    job_id_clone, e
-                );
-            }
-
-            // Process completion atomically using CompletionHandler
-            let completion_handler = CompletionHandler::new(db_conn.clone(), app_clone.clone());
             if let Err(e) = completion_handler
                 .process_completion(&completion_ctx, &metadata)
                 .await
@@ -856,41 +827,26 @@ impl JobQueue {
                 );
                 // Mark entity as failed when completion handler errors
                 completion_handler.mark_entity_failed(&metadata);
-                // Update job status to error
-                db_update_job_status(
-                    &db_conn,
-                    &job_id_clone,
-                    "error",
-                    None,
-                    Some(&format!("Completion handler error: {}", e)),
+                final_status = "error".to_string();
+                final_success = false;
+                final_error_msg = Some(format!("Completion handler error: {}", e));
+                emit_entity_terminal_update(&app_clone, &db_conn, &metadata);
+            } else if !result.2 {
+                emit_entity_terminal_update(&app_clone, &db_conn, &metadata);
+            }
+
+            update_job_status(&final_status, result.1, final_error_msg.as_deref());
+
+            if let Err(e) = on_event.send(StreamEvent {
+                job_id: job_id_clone.clone(),
+                event_type: final_status.clone(),
+                content: format!("Job {} with code {:?}", final_status, result.1),
+                timestamp: chrono::Utc::now().timestamp_millis(),
+            }) {
+                eprintln!(
+                    "[job_queue] job_id={} Failed to send completion event: {}",
+                    job_id_clone, e
                 );
-                // Emit entity updated event so frontend updates
-                match metadata.job_type {
-                    super::result_parser::JobType::CompanyResearch => {
-                        events::emit_lead_updated(&app_clone, metadata.entity_id);
-                    }
-                    super::result_parser::JobType::PersonResearch
-                    | super::result_parser::JobType::Conversation => {
-                        // Get lead_id for the person to emit person-updated event
-                        if let Ok(conn) = db_conn.lock() {
-                            if let Ok(Some(person)) =
-                                crate::db::get_person_raw(&conn, metadata.entity_id)
-                            {
-                                events::emit_person_updated(
-                                    &app_clone,
-                                    metadata.entity_id,
-                                    person.lead_id,
-                                );
-                            }
-                        }
-                    }
-                    super::result_parser::JobType::Scoring => {
-                        events::emit_lead_updated(&app_clone, metadata.entity_id);
-                    }
-                    super::result_parser::JobType::LeadFinder => {
-                        // No specific entity to update
-                    }
-                }
             }
             crate::orchestration::cleanup_job_workspace(&app_clone, &job_id_clone);
 
@@ -902,7 +858,7 @@ impl JobQueue {
             job_guard.defuse();
 
             // Call the completion callback with accumulated stdout
-            on_complete(metadata, completion_ctx.accumulated_stdout, result.2);
+            on_complete(metadata, completion_ctx.accumulated_stdout, final_success);
         });
 
         Ok(job_id)
@@ -949,6 +905,39 @@ fn db_update_job_pid(conn: &Arc<std::sync::Mutex<rusqlite::Connection>>, job_id:
     }
 }
 
+fn db_job_is_terminal(conn: &Arc<std::sync::Mutex<rusqlite::Connection>>, job_id: &str) -> bool {
+    let Ok(conn) = conn.lock() else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT status IN ('completed', 'error', 'timeout', 'cancelled') FROM jobs WHERE id = ?1",
+        rusqlite::params![job_id],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+fn emit_entity_terminal_update(
+    app: &AppHandle,
+    conn: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+    metadata: &JobMetadata,
+) {
+    match metadata.job_type {
+        super::result_parser::JobType::CompanyResearch | super::result_parser::JobType::Scoring => {
+            events::emit_lead_updated(app, metadata.entity_id);
+        }
+        super::result_parser::JobType::PersonResearch
+        | super::result_parser::JobType::Conversation => {
+            if let Ok(conn) = conn.lock() {
+                if let Ok(Some(person)) = crate::db::get_person_raw(&conn, metadata.entity_id) {
+                    events::emit_person_updated(app, metadata.entity_id, person.lead_id);
+                }
+            }
+        }
+        super::result_parser::JobType::LeadFinder => {}
+    }
+}
+
 /// Reset entity status when job fails early (queue timeout, cancellation, etc.)
 fn db_reset_entity_status(
     conn: &Arc<std::sync::Mutex<rusqlite::Connection>>,
@@ -987,37 +976,74 @@ fn db_reset_entity_status(
 }
 
 fn find_claude_path() -> Option<String> {
-    // Check environment variable first
+    static CLAUDE_PATH_CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CLAUDE_PATH_CACHE.get_or_init(resolve_claude_path).clone()
+}
+
+fn resolve_claude_path() -> Option<String> {
     if let Ok(path) = std::env::var("CLAUDE_PATH") {
         if std::path::Path::new(&path).exists() {
             return Some(path);
         }
     }
 
-    // Use a login shell to find claude - this loads the user's profile and full PATH
-    // Only use -l (login), not -i (interactive) to avoid extra output
-    for shell in &["/bin/zsh", "/bin/bash"] {
-        if let Ok(output) = std::process::Command::new(shell)
-            .args(["-lc", "which claude"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!(
-                "[job_queue] {} -lc 'which claude': status={}, stdout='{}', stderr='{}'",
-                shell, output.status, stdout, stderr
-            );
+    if let Ok(path) = which::which("claude") {
+        let path = path.to_string_lossy().to_string();
+        eprintln!("[job_queue] Found claude at: {}", path);
+        return Some(path);
+    }
 
-            if output.status.success()
-                && !stdout.is_empty()
-                && std::path::Path::new(&stdout).exists()
-            {
-                eprintln!("[job_queue] Found claude at: {}", stdout);
-                return Some(stdout);
-            }
+    for candidate in common_claude_paths() {
+        if std::path::Path::new(&candidate).exists() {
+            eprintln!("[job_queue] Found claude at: {}", candidate);
+            return Some(candidate);
         }
     }
 
     eprintln!("[job_queue] Could not find claude CLI");
     None
+}
+
+fn common_claude_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(format!("{}/.bun/bin/claude", home));
+        paths.push(format!("{}/.npm-global/bin/claude", home));
+        paths.push(format!("{}/.local/bin/claude", home));
+    }
+    paths.extend([
+        "/opt/homebrew/bin/claude".to_string(),
+        "/usr/local/bin/claude".to_string(),
+        "/usr/bin/claude".to_string(),
+    ]);
+    paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn specialist_stream_updates_are_incremental() {
+        let dir =
+            std::env::temp_dir().join(format!("augur-specialist-log-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pain-diagnostician.stream.log");
+        let mut offsets = HashMap::new();
+
+        std::fs::write(&path, "first note\n").unwrap();
+        assert_eq!(
+            read_specialist_stream_updates(&dir, &mut offsets),
+            vec![("pain-diagnostician".to_string(), "first note".to_string())]
+        );
+
+        std::fs::write(&path, "first note\nsecond note\n").unwrap();
+        assert_eq!(
+            read_specialist_stream_updates(&dir, &mut offsets),
+            vec![("pain-diagnostician".to_string(), "second note".to_string())]
+        );
+        assert!(read_specialist_stream_updates(&dir, &mut offsets).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

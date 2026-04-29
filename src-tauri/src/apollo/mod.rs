@@ -16,7 +16,9 @@ const KEYRING_USER: &str = "apollo_api_key";
 const USAGE_PENDING: &str = "pending";
 const USAGE_COMPLETED: &str = "completed";
 const USAGE_FAILED: &str = "failed";
+const USAGE_ABANDONED: &str = "abandoned";
 const USAGE_BUDGET_EXCEEDED: &str = "budget_exceeded";
+const PENDING_RECOVERY_AGE_MS: i64 = 60 * 60 * 1000;
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +67,27 @@ pub fn clear_api_key() -> Result<(), String> {
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+pub fn recover_abandoned_usage(conn: &Connection, now: i64) -> Result<usize, String> {
+    let cutoff = now - PENDING_RECOVERY_AGE_MS;
+    conn.execute(
+        "UPDATE apollo_usage
+         SET status = ?1,
+             error_message = 'Recovered abandoned Apollo reservation'
+         WHERE status = ?2
+           AND created_at < ?3
+           AND (
+             job_id IS NULL
+             OR NOT EXISTS (
+               SELECT 1 FROM jobs
+               WHERE jobs.id = apollo_usage.job_id
+                 AND jobs.status IN ('queued', 'running')
+             )
+           )",
+        params![USAGE_ABANDONED, USAGE_PENDING, cutoff],
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub async fn enrich_people_json(
@@ -158,16 +181,10 @@ pub async fn enrich_people_json(
         return enriched;
     }
 
+    let requested_count = requests.len() as i64;
     let usage_id = match settings.daily_budget_usd_cents {
         Some(limit_cents) => {
-            match reserve_budget(
-                &db_conn,
-                job_id,
-                lead_id,
-                requests.len() as i64,
-                limit_cents,
-                now,
-            ) {
+            match reserve_budget(&db_conn, job_id, lead_id, requested_count, limit_cents, now) {
                 Ok(BudgetReservation::Reserved(id)) => Some(id),
                 Ok(BudgetReservation::Denied) => return enriched,
                 Err(e) => {
@@ -210,7 +227,7 @@ pub async fn enrich_people_json(
                 usage_id,
                 job_id,
                 lead_id,
-                requests.len() as i64,
+                requested_count,
                 enriched_count,
                 USAGE_COMPLETED,
                 None,
@@ -223,7 +240,7 @@ pub async fn enrich_people_json(
                 usage_id,
                 job_id,
                 lead_id,
-                requests.len() as i64,
+                requested_count,
                 0,
                 USAGE_FAILED,
                 Some(&e),
@@ -302,7 +319,7 @@ async fn bulk_match(api_key: &str, details: Vec<Value>) -> Result<Value, String>
             return serde_json::from_str(&body).map_err(|e| e.to_string());
         }
 
-        last_error = Some(format!("Apollo returned {}: {}", status, body));
+        last_error = Some(safe_provider_error(status.as_u16(), &body));
         if !should_retry_status(status.as_u16()) || attempt == MAX_ATTEMPTS {
             break;
         }
@@ -329,6 +346,14 @@ fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
         .parse::<u64>()
         .ok()
         .map(Duration::from_secs)
+}
+
+fn safe_provider_error(status: u16, body: &str) -> String {
+    let body_hash = Sha256::digest(body.as_bytes());
+    format!(
+        "Apollo returned HTTP {} (body_sha256={:x})",
+        status, body_hash
+    )
 }
 
 fn detail_for_person(person: &Value, domain: Option<&str>, company_name: &str) -> Value {
@@ -398,28 +423,37 @@ fn merge_apollo_person(person: &mut Value, apollo_person: &Value) -> bool {
 
     let mut changed = false;
 
+    let mut apollo_email_applies = false;
     if let Some(email) = email {
-        let existing = person_obj
+        let existing_email = person_obj
             .get("email")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim()
-            .is_empty();
-        if existing {
+            .to_string();
+        if existing_email.is_empty() {
             person_obj.insert("email".to_string(), Value::String(email.to_string()));
             changed = true;
+            apollo_email_applies = true;
+        } else if existing_email.eq_ignore_ascii_case(email.trim()) {
+            apollo_email_applies = true;
         }
-        person_obj.insert(
-            "emailSource".to_string(),
-            Value::String("apollo".to_string()),
-        );
+
+        if apollo_email_applies {
+            person_obj.insert(
+                "emailSource".to_string(),
+                Value::String("apollo".to_string()),
+            );
+        }
     }
 
-    if let Some(email_status) = email_status {
-        person_obj.insert(
-            "emailStatus".to_string(),
-            Value::String(email_status.to_string()),
-        );
+    if apollo_email_applies {
+        if let Some(email_status) = email_status {
+            person_obj.insert(
+                "emailStatus".to_string(),
+                Value::String(email_status.to_string()),
+            );
+        }
     }
     if let Some(id) = id {
         person_obj.insert("apolloPersonId".to_string(), Value::String(id.to_string()));
@@ -427,7 +461,7 @@ fn merge_apollo_person(person: &mut Value, apollo_person: &Value) -> bool {
     copy_if_missing(person_obj, apollo_person, "title", "title");
     copy_if_missing(person_obj, apollo_person, "linkedinUrl", "linkedin_url");
 
-    changed || email.is_some()
+    changed || apollo_email_applies
 }
 
 fn find_best_match_index(person: &Value, candidates: &[Value]) -> Option<usize> {
@@ -447,17 +481,23 @@ fn find_best_match_index(person: &Value, candidates: &[Value]) -> Option<usize> 
         return None;
     }
 
-    candidates
+    let matches: Vec<usize> = candidates
         .iter()
         .enumerate()
-        .find(|(_, candidate)| {
+        .filter_map(|(index, candidate)| {
             let candidate_first = normalized_field(candidate, "first_name")
                 .if_empty_then(|| normalized_field(candidate, "firstName"));
             let candidate_last = normalized_field(candidate, "last_name")
                 .if_empty_then(|| normalized_field(candidate, "lastName"));
-            candidate_first == first && candidate_last == last
+            (candidate_first == first && candidate_last == last).then_some(index)
         })
-        .map(|(index, _)| index)
+        .collect();
+
+    if matches.len() == 1 {
+        Some(matches[0])
+    } else {
+        None
+    }
 }
 
 trait EmptyStringExt {
@@ -511,7 +551,7 @@ fn copy_if_missing(
 
 fn cache_key_for_person(person: &Value, domain: Option<&str>, company_name: &str) -> String {
     let raw = format!(
-        "{}|{}|{}|{}|{}",
+        "v2|{}|{}|{}|{}|{}",
         person
             .get("firstName")
             .and_then(Value::as_str)
@@ -691,6 +731,7 @@ fn reserve_budget_on_conn(
     Ok(BudgetReservation::Reserved(usage_id))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_or_log_usage(
     db_conn: &Arc<Mutex<Connection>>,
     usage_id: Option<i64>,
@@ -824,6 +865,27 @@ mod tests {
     }
 
     #[test]
+    fn merge_apollo_person_preserves_existing_email_provenance() {
+        let mut person = json!({
+            "firstName": "Ada",
+            "lastName": "Lovelace",
+            "email": "ada@user-entered.example",
+            "emailSource": "manual"
+        });
+        let apollo = json!({
+            "id": "abc123",
+            "email": "ada@apollo.example",
+            "email_status": "verified"
+        });
+
+        assert!(!merge_apollo_person(&mut person, &apollo));
+        assert_eq!(person["email"], "ada@user-entered.example");
+        assert_eq!(person["emailSource"], "manual");
+        assert!(person.get("emailStatus").is_none());
+        assert_eq!(person["apolloPersonId"], "abc123");
+    }
+
+    #[test]
     fn best_match_uses_name_instead_of_response_order() {
         let person = json!({
             "firstName": "Ada",
@@ -835,6 +897,29 @@ mod tests {
         ];
 
         assert_eq!(find_best_match_index(&person, &candidates), Some(1));
+    }
+
+    #[test]
+    fn best_match_skips_ambiguous_name_without_linkedin() {
+        let person = json!({
+            "firstName": "John",
+            "lastName": "Smith"
+        });
+        let candidates = vec![
+            json!({"first_name": "John", "last_name": "Smith", "email": "john.one@example.com"}),
+            json!({"first_name": "John", "last_name": "Smith", "email": "john.two@example.com"}),
+        ];
+
+        assert_eq!(find_best_match_index(&person, &candidates), None);
+    }
+
+    #[test]
+    fn provider_error_is_sanitized_to_status_and_hash() {
+        let error = safe_provider_error(500, r#"{"debug":"secret account payload"}"#);
+
+        assert!(error.contains("HTTP 500"));
+        assert!(error.contains("body_sha256="));
+        assert!(!error.contains("secret account payload"));
     }
 
     #[test]

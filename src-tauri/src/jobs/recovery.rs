@@ -207,6 +207,7 @@ pub fn recover_stuck_entities(conn: &Connection, app: &AppHandle) -> Result<usiz
         )
         .map_err(|e| e.to_string())?;
         events::emit_lead_updated(app, lead.id);
+        cleanup_entity_workspaces(conn, app, "company_research", lead.id);
         recovered += 1;
         eprintln!(
             "[recovery] Recovered stuck lead {} ({})",
@@ -230,6 +231,7 @@ pub fn recover_stuck_entities(conn: &Connection, app: &AppHandle) -> Result<usiz
             .ok()
             .flatten();
         events::emit_person_updated(app, person.id, lead_id);
+        cleanup_entity_workspaces(conn, app, "person_research", person.id);
         recovered += 1;
         eprintln!(
             "[recovery] Recovered stuck person {} ({})",
@@ -238,6 +240,27 @@ pub fn recover_stuck_entities(conn: &Connection, app: &AppHandle) -> Result<usiz
     }
 
     Ok(recovered)
+}
+
+fn cleanup_entity_workspaces(conn: &Connection, app: &AppHandle, job_type: &str, entity_id: i64) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id FROM jobs
+         WHERE job_type = ?1
+           AND entity_id = ?2
+           AND status NOT IN ('queued', 'running')
+         ORDER BY created_at DESC
+         LIMIT 10",
+    ) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map(params![job_type, entity_id], |row| row.get::<_, String>(0))
+    else {
+        return;
+    };
+
+    for job_id in rows.flatten() {
+        crate::orchestration::cleanup_job_workspace(app, &job_id);
+    }
 }
 
 /// Run all recovery operations on startup
@@ -256,6 +279,18 @@ pub fn recover_on_startup(conn: &Arc<Mutex<Connection>>, app: &AppHandle) {
     match recover_stale_jobs(&conn_guard, app) {
         Ok(count) if count > 0 => eprintln!("[recovery] Recovered {} stale jobs", count),
         Err(e) => eprintln!("[recovery] Failed to recover stale jobs: {}", e),
+        _ => {}
+    }
+
+    match crate::apollo::recover_abandoned_usage(&conn_guard, chrono::Utc::now().timestamp_millis())
+    {
+        Ok(count) if count > 0 => {
+            eprintln!(
+                "[recovery] Recovered {} abandoned Apollo reservations",
+                count
+            )
+        }
+        Err(e) => eprintln!("[recovery] Failed to recover Apollo reservations: {}", e),
         _ => {}
     }
 

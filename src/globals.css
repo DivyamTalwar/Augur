@@ -1,0 +1,251 @@
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* ============================================
+   Augur OS Design Tokens — Crayola-tasteful warm
+   Reference: augur-os.html
+   ============================================ */
+
+@theme {
+  /* Surfaces — warm cream */
+  --color-bg: #FBF7F2;
+  --color-bg-2: #F4EDE3;
+  --color-paper: #FFFDF9;
+
+  /* Lines */
+  --color-line: #E9DFCF;
+  --color-line-2: #D9CCB6;
+
+  /* Ink (text) */
+  --color-ink: #1A1714;
+  --color-ink-2: #5C544B;
+  --color-ink-3: #8B8378;
+
+  /* Accents — Restrained: orange + green + ink only */
+  --color-flame: #FF5B1F;
+  --color-flame-2: #FF8A3D;
+  --color-leaf: #1FAA6D;
+  --color-leaf-2: #3FCB85;
+
+  /* Legacy token aliases — kept so existing utilities resolve to the 4-color palette. */
+  --color-grape: #1A1714;     /* alias → ink (black) */
+  --color-sky: #1FAA6D;       /* alias → leaf */
+  --color-sun: #FF8A3D;       /* alias → flame-2 */
+  --color-rose: #FF5B1F;      /* alias → flame */
+
+  /* Section colors — restrained */
+  --color-c-company: #FF5B1F;   /* orange */
+  --color-c-person: #1A1714;    /* black */
+  --color-c-convo: #1FAA6D;     /* green */
+  --color-c-overview: #FF8A3D;  /* light orange */
+
+  /* Typography */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --tracking-body: -0.005em;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+
+  /* shadcn semantic aliases mapped to new palette */
+  --color-background: var(--color-bg);
+  --color-foreground: var(--color-ink);
+  --color-card: var(--color-paper);
+  --color-card-foreground: var(--color-ink);
+  --color-popover: var(--color-paper);
+  --color-popover-foreground: var(--color-ink);
+  --color-primary: var(--color-flame);
+  --color-primary-foreground: #FFFFFF;
+  --color-secondary: var(--color-paper);
+  --color-secondary-foreground: var(--color-ink);
+  --color-muted: var(--color-bg-2);
+  --color-muted-foreground: var(--color-ink-2);
+  --color-accent: var(--color-flame);
+  --color-accent-foreground: #FFFFFF;
+  --color-destructive: #DC2626;
+  --color-border: var(--color-line);
+  --color-input: var(--color-line);
+  --color-ring: var(--color-flame);
+
+  /* Custom property registrations for animatable angles */
+}
+
+/* @property declarations must live outside @theme */
+@property --ang { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --ang2 { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --coreA { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+
+/* ============================================
+   Base
+   ============================================ */
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    overscroll-behavior: none;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "liga" 1, "calt" 1, "kern" 1;
+    letter-spacing: var(--tracking-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  input, textarea, [contenteditable="true"] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  ::selection { background: rgba(255, 91, 31, 0.25); color: var(--color-ink); }
+}
+
+/* ============================================
+   Keyframes (from reference)
+   ============================================ */
+
+@keyframes float1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(-60px, 40px) scale(1.1); }
+  66% { transform: translate(40px, -50px) scale(0.95); }
+}
+@keyframes float2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(80px, -60px) scale(1.15); }
+}
+@keyframes float3 {
+  0%, 100% { transform: translate(0, 0) scale(0.9); }
+  50% { transform: translate(-100px, 80px) scale(1.1); }
+}
+
+@keyframes brand-spin { from { --ang2: 0deg; } to { --ang2: 360deg; } }
+@keyframes editor-spin { from { --ang: 0deg; } to { --ang: 360deg; } }
+@keyframes core-spin { from { --coreA: 0deg; } to { --coreA: 360deg; } }
+@keyframes spin-360 { to { transform: rotate(360deg); } }
+
+@keyframes edge-flow { to { background-position: 0 -200%; } }
+@keyframes shimmer { to { background-position: -200% 0; } }
+@keyframes gradient-shift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+@keyframes btn-flow {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+@keyframes indicator-sweep {
+  0% { background-position: -50% 0; }
+  100% { background-position: 150% 0; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(255, 91, 31, 0.18); }
+  50% { box-shadow: 0 0 0 7px rgba(255, 91, 31, 0.04); }
+}
+@keyframes pulse-active {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(255, 91, 31, 0.18); }
+  50% { box-shadow: 0 0 0 7px rgba(255, 91, 31, 0.05); }
+}
+@keyframes bar-pulse {
+  50% { box-shadow: 0 0 16px rgba(255, 91, 31, 0.9); height: 22px; }
+}
+@keyframes dot-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 91, 31, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(255, 91, 31, 0.18); }
+}
+@keyframes ring-out {
+  0% { transform: scale(0.95); opacity: 0.7; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+@keyframes bounce-dots {
+  0%, 100% { transform: translateY(0); opacity: 0.4; }
+  50% { transform: translateY(-3px); opacity: 1; }
+}
+@keyframes s-pulse {
+  0%, 100% { box-shadow: 0 4px 10px -4px rgba(26, 23, 20, 0.18); }
+  50% { box-shadow: 0 4px 16px -2px rgba(255, 91, 31, 0.5); }
+}
+@keyframes log-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ============================================
+   Utilities
+   ============================================ */
+
+.font-mono-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--color-ink-3);
+}
+
+/* Subtle dot grid background under hero */
+.grid-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--color-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: 0.25;
+  -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
+}
+
+/* Focus ring */
+:focus:not(:focus-visible) { outline: none; }
+:focus-visible {
+  outline: 1px solid var(--color-flame);
+  outline-offset: 2px;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-line-2);
+  border-radius: 999px;
+  border: 3px solid var(--color-bg);
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--color-ink-3); }
+
+@supports not selector(::-webkit-scrollbar) {
+  html { scrollbar-width: thin; scrollbar-color: var(--color-line-2) transparent; }
+}
+
+.scroll-stable { scrollbar-gutter: stable; }
+
+/* Tab content fade */
+.tab-pane {
+  animation: fade-up 0.35s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/* Toast error fix */
+[data-sonner-toast][data-type="error"] [data-title] {
+  color: var(--color-destructive) !important;
+}

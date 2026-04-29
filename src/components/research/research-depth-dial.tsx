@@ -13,28 +13,33 @@ const depths: Array<{ value: ResearchDepth; label: string; estimate: string }> =
 interface ResearchDepthDialProps {
   value: ResearchDepth;
   onChange: (depth: ResearchDepth) => void;
-  specialistsEnabled: boolean;
+  orchestrationEnabled: boolean;
 }
 
-export function ResearchDepthDial({ value, onChange, specialistsEnabled }: ResearchDepthDialProps) {
+export function ResearchDepthDial({ value, onChange, orchestrationEnabled }: ResearchDepthDialProps) {
   return (
     <div className="rounded-[8px] border border-line bg-paper/80 px-3 py-2">
       <div className="flex items-center justify-between gap-3 mb-2">
         <span className="font-mono-label text-ink-3">Research Depth</span>
         <span className="font-mono text-[10px] text-ink-3">
-          {specialistsEnabled ? "per-run" : "legacy"}
+          {value === "light" ? "legacy" : orchestrationEnabled ? "per-run" : "disabled"}
         </span>
       </div>
-      <div className="grid grid-cols-3 gap-1 rounded-[8px] bg-bg-2 p-1 border border-line">
+      <div className="grid grid-cols-3 gap-1 rounded-[8px] bg-bg-2 p-1 border border-line" role="radiogroup" aria-label="Research depth">
         {depths.map((depth) => {
           const active = value === depth.value;
+          const disabled = depth.value !== "light" && !orchestrationEnabled;
           return (
             <button
               key={depth.value}
               type="button"
+              role="radio"
+              aria-checked={active}
+              aria-disabled={disabled}
+              disabled={disabled}
               onClick={() => onChange(depth.value)}
               className={cn(
-                "relative h-8 rounded-[6px] text-[11px] font-medium transition-colors",
+                "relative h-8 rounded-[6px] text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45",
                 active ? "text-ink" : "text-ink-3 hover:text-ink"
               )}
             >

@@ -3,10 +3,6 @@ import type { ClientLogEntry } from "@/lib/types/claude";
 export function CostPill({ logs }: { logs: ClientLogEntry[] }) {
   const total = logs.reduce((sum, log) => sum + (log.usage?.totalCostUsd ?? 0), 0);
 
-  if (total <= 0) {
-    return null;
-  }
-
   const hot = total >= 1;
 
   return (

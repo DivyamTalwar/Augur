@@ -1,0 +1,21 @@
+<svg width="320" height="96" viewBox="0 0 320 96" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Augur OS</title>
+  <desc id="desc">Augur reads the signals. You close the deal.</desc>
+  <defs>
+    <linearGradient id="mark" x1="18" y1="12" x2="82" y2="84" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF5D00"/>
+      <stop offset="0.48" stop-color="#FF8A1F"/>
+      <stop offset="1" stop-color="#1FAA6D"/>
+    </linearGradient>
+    <linearGradient id="text" x1="96" y1="20" x2="260" y2="76" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FBF7F2"/>
+      <stop offset="1" stop-color="#E9DDD0"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="72" height="72" rx="20" fill="#1A1714"/>
+  <rect x="13.5" y="13.5" width="69" height="69" rx="18.5" stroke="url(#mark)" stroke-width="3"/>
+  <path d="M48 24L68 72H58.5L54.5 62H41.2L37.3 72H28L48 24ZM44 54.2H51.7L47.9 43.8L44 54.2Z" fill="url(#mark)"/>
+  <circle cx="68" cy="28" r="5" fill="#1FAA6D"/>
+  <text x="100" y="49" fill="url(#text)" font-family="Inter, Arial, sans-serif" font-size="32" font-weight="800" letter-spacing="0">Augur OS</text>
+  <text x="102" y="70" fill="#A89C92" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600" letter-spacing="0">reads the signals. you close the deal.</text>
+</svg>

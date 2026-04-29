@@ -3,7 +3,7 @@ use crate::events::{emit_lead_updated, emit_person_updated};
 use crate::jobs::{EntityContext, EntityType, JobMetadata, JobQueue, JobType, StreamEvent};
 use crate::prompts::get_default_prompt;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 // ============================================================================
@@ -15,6 +15,27 @@ use tauri::{ipc::Channel, AppHandle, Manager, State};
 pub struct ResearchResult {
     pub job_id: String,
     pub status: String,
+}
+
+fn prepare_clean_output_dir(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        fs::remove_dir_all(path)
+            .map_err(|e| format!("Failed to remove stale output directory {:?}: {}", path, e))?;
+    }
+    fs::create_dir_all(path)
+        .map_err(|e| format!("Failed to create output directory {:?}: {}", path, e))
+}
+
+fn prepare_clean_output_file(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create output directory {:?}: {}", parent, e))?;
+    }
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|e| format!("Failed to remove stale output file {:?}: {}", path, e))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -106,7 +127,7 @@ pub async fn start_research(
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect::<String>();
     let lead_dir = output_dir.join(format!("company_{}_{}", lead_id, company_slug));
-    fs::create_dir_all(&lead_dir).ok();
+    prepare_clean_output_dir(&lead_dir)?;
 
     let profile_path = lead_dir.join("company_profile.md");
     let people_path = lead_dir.join("people.json");
@@ -260,7 +281,7 @@ pub async fn start_person_research(
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect::<String>();
     let person_dir = output_dir.join(format!("person_{}_{}", person_id, person_slug));
-    fs::create_dir_all(&person_dir).ok();
+    prepare_clean_output_dir(&person_dir)?;
 
     let profile_path = person_dir.join("person_profile.md");
     let enrichment_path = person_dir.join("enrichment.json");
@@ -339,7 +360,7 @@ pub async fn kill_job(
 ) -> Result<(), String> {
     // Try in-memory cancellation first
     match queue.kill_job(&job_id).await {
-        Ok(()) => return Ok(()),
+        Ok(()) => Ok(()),
         Err(_) => {
             // Job not in active_jobs — it may be a stuck/orphaned job.
             // Try to kill the process by PID from the database, then mark it cancelled.
@@ -349,15 +370,19 @@ pub async fn kill_job(
             );
             let conn = db_state.conn.lock().map_err(|e| e.to_string())?;
             if let Ok(Some(job)) = crate::db::get_job(&conn, &job_id) {
-                // Kill the process if we have a PID and it's still "running"
-                if let Some(pid) = job.pid {
-                    #[cfg(unix)]
-                    {
-                        use nix::sys::signal::{kill, Signal};
-                        use nix::unistd::Pid;
-                        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                let active_status = matches!(job.status.as_str(), "queued" | "running");
+                // Kill the process only for active jobs to avoid stale PID reuse.
+                if active_status {
+                    if let Some(pid) = job.pid {
+                        #[cfg(unix)]
+                        {
+                            use nix::sys::signal::{kill, Signal};
+                            use nix::unistd::Pid;
+                            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                        }
                     }
                 }
+                crate::orchestration::cleanup_job_workspace(&app, &job_id);
                 // Update DB status to cancelled
                 let _ = crate::db::update_job_status(
                     &conn,
@@ -369,14 +394,14 @@ pub async fn kill_job(
                 // Reset entity status based on job type
                 let rollback_status = "pending";
                 match job.job_type.as_str() {
-                    "company_research" | "scoring" | "lead_finder" => {
+                    "company_research" => {
                         let _ = conn.execute(
                             "UPDATE leads SET research_status = ?1 WHERE id = ?2",
                             rusqlite::params![rollback_status, job.entity_id],
                         );
                         crate::events::emit_lead_updated(&app, job.entity_id);
                     }
-                    "person_research" | "conversation" => {
+                    "person_research" => {
                         let _ = conn.execute(
                             "UPDATE people SET research_status = ?1 WHERE id = ?2",
                             rusqlite::params![rollback_status, job.entity_id],
@@ -388,9 +413,10 @@ pub async fn kill_job(
                     _ => {}
                 }
                 crate::events::emit_job_status_changed(&app, job_id, "cancelled".to_string(), None);
-                return Ok(());
+                Ok(())
+            } else {
+                Err("Job not found".to_string())
             }
-            Err("Job not found".to_string())
         }
     }
 }
@@ -589,6 +615,7 @@ pub async fn start_find_leads(
 
     let timestamp = chrono::Utc::now().timestamp_millis();
     let leads_path = output_dir.join(format!("leads_{}.json", timestamp));
+    prepare_clean_output_file(&leads_path)?;
 
     // Build prompt
     let full_prompt = build_find_leads_prompt(
@@ -619,14 +646,7 @@ pub async fn start_find_leads(
         enrichment_output_path: None,
     };
 
-    let entity_label = format!(
-        "Find Leads: {}",
-        if icp_description.len() > 50 {
-            format!("{}...", &icp_description[..50])
-        } else {
-            icp_description.clone()
-        }
-    );
+    let entity_label = format!("Find Leads: {}", truncate_chars(&icp_description, 50));
 
     let job_id = queue
         .start_job_with_callback(
@@ -763,6 +783,7 @@ pub async fn start_scoring(
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect::<String>();
     let score_path = output_dir.join(format!("score_{}_{}.json", lead_id, company_slug));
+    prepare_clean_output_file(&score_path)?;
 
     // Build scoring prompt
     let full_prompt = build_scoring_prompt(&lead, &people, &config, &score_path);
@@ -886,6 +907,7 @@ pub async fn start_conversation_generation(
         .collect::<String>();
     let conversation_path =
         output_dir.join(format!("conversation_{}_{}.md", person_id, person_slug));
+    prepare_clean_output_file(&conversation_path)?;
 
     // Build conversation prompt
     let full_prompt = build_conversation_prompt(
@@ -1321,15 +1343,35 @@ fn format_lead_context(lead: &db::Lead, people: &[db::Person]) -> String {
             let linkedin = person.linkedin_url.as_deref().unwrap_or("No LinkedIn");
             parts.push(format!("  - {}, {} ({}, {})", name, title, email, linkedin));
             if let Some(profile) = &person.person_profile {
-                let truncated = if profile.len() > 200 {
-                    format!("{}...", &profile[..200])
-                } else {
-                    profile.clone()
-                };
+                let truncated = truncate_chars(profile, 200);
                 parts.push(format!("    Profile: {}", truncated));
             }
         }
     }
 
     parts.join("\n")
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    let mut chars = input.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}...", truncated)
+    } else {
+        input.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncate_chars_respects_utf8_boundaries() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+        assert_eq!(truncate_chars("hello", 3), "hel...");
+        assert_eq!(truncate_chars("Geschäftsführer", 8), "Geschäft...");
+        assert_eq!(truncate_chars("😀😀😀", 2), "😀😀...");
+        assert_eq!(truncate_chars("東京大阪京都", 4), "東京大阪...");
+    }
 }

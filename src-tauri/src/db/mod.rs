@@ -26,6 +26,7 @@ impl DbState {
 
         // Enable WAL mode for better concurrency
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
 
         // Initialize schema
         init_schema(&conn)?;
@@ -297,11 +298,13 @@ fn run_migrations(conn: &Connection) -> SqliteResult<()> {
 
             -- Copy existing data
             INSERT INTO people_new (
-                id, lead_id, first_name, last_name, email, title, management_level,
+                id, lead_id, first_name, last_name, email, email_source, email_status,
+                apollo_person_id, title, management_level,
                 linkedin_url, year_joined, person_profile, research_status, researched_at,
                 user_status, conversation_topics, conversation_generated_at, created_at
             )
-            SELECT id, lead_id, first_name, last_name, email, title, management_level,
+            SELECT id, lead_id, first_name, last_name, email, email_source, email_status,
+                   apollo_person_id, title, management_level,
                    linkedin_url, year_joined, person_profile, research_status, researched_at,
                    user_status, conversation_topics, conversation_generated_at, created_at
             FROM people;

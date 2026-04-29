@@ -514,6 +514,7 @@ pub fn get_active_scoring_config(conn: &Connection) -> SqliteResult<Option<Parse
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn save_scoring_config(
     conn: &Connection,
     name: &str,
@@ -637,6 +638,7 @@ pub fn get_unscored_leads(conn: &Connection) -> SqliteResult<Vec<Lead>> {
     rows.collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn save_lead_score(
     conn: &Connection,
     lead_id: i64,

@@ -109,37 +109,54 @@ impl CompletionHandler {
         ctx: &CompletionContext,
         metadata: &JobMetadata,
     ) -> Result<(), CompletionError> {
-        // Update completion state: started
-        self.update_completion_state(&ctx.job_id, CompletionPhase::Started);
+        let result: Result<(), CompletionError> = async {
+            // Update completion state: started
+            self.update_completion_state(&ctx.job_id, CompletionPhase::Started);
 
-        // If job failed, mark entity as failed and return early
-        if !ctx.success {
+            // If job failed, mark entity as failed and remove partial/stale artifacts.
+            if !ctx.success {
+                self.mark_entity_failed(metadata);
+                self.cleanup_files(metadata)?;
+                self.update_completion_state(&ctx.job_id, CompletionPhase::Failed);
+                return Ok(());
+            }
+
+            // Phase 1: Verify output files
+            let outputs = self.verify_output_files(metadata)?;
+            self.update_completion_state(&ctx.job_id, CompletionPhase::FilesVerified);
+
+            // Phase 2: Parse and validate content
+            let parsed = self.parse_output_content(&outputs, metadata, ctx).await?;
+            self.update_completion_state(&ctx.job_id, CompletionPhase::ContentParsed);
+
+            // Phase 3: Update database
+            self.update_database(&parsed, metadata)?;
+            self.update_completion_state(&ctx.job_id, CompletionPhase::DatabaseUpdated);
+
+            // Phase 4: Cleanup files (only after DB is confirmed)
+            self.cleanup_files(metadata)?;
+            self.update_completion_state(&ctx.job_id, CompletionPhase::FilesCleanedUp);
+
+            // Phase 5: Emit events and mark complete
+            self.emit_completion_events(metadata);
+            self.update_completion_state(&ctx.job_id, CompletionPhase::Completed);
+
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
             self.mark_entity_failed(metadata);
+            if let Err(e) = self.cleanup_files(metadata) {
+                eprintln!(
+                    "[completion_handler] Warning: Failed to cleanup after completion error: {}",
+                    e
+                );
+            }
             self.update_completion_state(&ctx.job_id, CompletionPhase::Failed);
-            return Ok(());
         }
 
-        // Phase 1: Verify output files
-        let outputs = self.verify_output_files(metadata)?;
-        self.update_completion_state(&ctx.job_id, CompletionPhase::FilesVerified);
-
-        // Phase 2: Parse and validate content
-        let parsed = self.parse_output_content(&outputs, metadata, ctx).await?;
-        self.update_completion_state(&ctx.job_id, CompletionPhase::ContentParsed);
-
-        // Phase 3: Update database
-        self.update_database(&parsed, metadata)?;
-        self.update_completion_state(&ctx.job_id, CompletionPhase::DatabaseUpdated);
-
-        // Phase 4: Cleanup files (only after DB confirmed)
-        self.cleanup_files(metadata)?;
-        self.update_completion_state(&ctx.job_id, CompletionPhase::FilesCleanedUp);
-
-        // Phase 5: Emit events and mark complete
-        self.emit_completion_events(metadata);
-        self.update_completion_state(&ctx.job_id, CompletionPhase::Completed);
-
-        Ok(())
+        result
     }
 
     /// Verify that output files exist and are readable
@@ -147,64 +164,7 @@ impl CompletionHandler {
         &self,
         metadata: &JobMetadata,
     ) -> Result<VerifiedOutputs, CompletionError> {
-        let primary_path = &metadata.primary_output_path;
-
-        // Check primary file exists
-        if !primary_path.exists() {
-            return Err(CompletionError::FileNotFound(primary_path.clone()));
-        }
-
-        // Read primary content
-        let primary_content = fs::read_to_string(primary_path)
-            .map_err(|e| CompletionError::FileReadError(primary_path.clone(), e))?;
-
-        // Validate primary content is not empty
-        if primary_content.trim().is_empty() {
-            return Err(CompletionError::ValidationError(format!(
-                "Primary output file is empty: {:?}",
-                primary_path
-            )));
-        }
-
-        // Read secondary content if path provided
-        let secondary_content = if let Some(secondary_path) = &metadata.secondary_output_path {
-            if secondary_path.exists() {
-                Some(
-                    fs::read_to_string(secondary_path)
-                        .map_err(|e| CompletionError::FileReadError(secondary_path.clone(), e))?,
-                )
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Read enrichment content if path provided (optional, don't fail if missing)
-        let enrichment_content = if let Some(enrichment_path) = &metadata.enrichment_output_path {
-            if enrichment_path.exists() {
-                match fs::read_to_string(enrichment_path) {
-                    Ok(content) => Some(content),
-                    Err(e) => {
-                        eprintln!(
-                            "[completion_handler] Warning: Failed to read enrichment file {:?}: {}",
-                            enrichment_path, e
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        Ok(VerifiedOutputs {
-            primary_content,
-            secondary_content,
-            enrichment_content,
-        })
+        verify_output_files_for_metadata(metadata)
     }
 
     /// Parse output content based on job type
@@ -216,29 +176,21 @@ impl CompletionHandler {
     ) -> Result<ParsedOutput, CompletionError> {
         match metadata.job_type {
             JobType::CompanyResearch => {
-                let people = if let Some(ref people_json) = outputs.secondary_content {
-                    match serde_json::from_str::<Vec<serde_json::Value>>(people_json) {
-                        Ok(p) => {
-                            let enriched = crate::apollo::enrich_people_json(
-                                self.db_conn.clone(),
-                                &ctx.job_id,
-                                metadata.entity_id,
-                                p,
-                            )
-                            .await;
-                            Some(enriched)
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[completion_handler] Warning: Failed to parse people JSON: {}",
-                                e
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
+                let people_json = outputs.secondary_content.as_ref().ok_or_else(|| {
+                    CompletionError::ValidationError(
+                        "Company research completed without required people.json".to_string(),
+                    )
+                })?;
+                let parsed_people = parse_company_people_json(people_json)?;
+                let people = Some(
+                    crate::apollo::enrich_people_json(
+                        self.db_conn.clone(),
+                        &ctx.job_id,
+                        metadata.entity_id,
+                        parsed_people,
+                    )
+                    .await,
+                );
 
                 // Parse enrichment data (optional)
                 let enrichment = if let Some(ref enrichment_json) = outputs.enrichment_content {
@@ -356,52 +308,10 @@ impl CompletionHandler {
             } => {
                 let lead_id = metadata.entity_id;
 
-                // Update people if available
+                // Merge people if available. Company reruns must not destroy existing person IDs,
+                // user status, researched profiles, or generated conversation topics.
                 if let Some(people_data) = people {
-                    // Delete existing people
-                    tx.execute(
-                        "DELETE FROM people WHERE lead_id = ?1",
-                        rusqlite::params![lead_id],
-                    )
-                    .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
-
-                    // Insert new people with enrichment fields
-                    let now = chrono::Utc::now().timestamp_millis();
-                    for p in people_data {
-                        let first_name = extract_first_name(p);
-                        let last_name = extract_last_name(p);
-                        let email = p.get("email").and_then(|v| v.as_str());
-                        let email_source = p.get("emailSource").and_then(|v| v.as_str());
-                        let email_status = p.get("emailStatus").and_then(|v| v.as_str());
-                        let apollo_person_id = p.get("apolloPersonId").and_then(|v| v.as_str());
-                        let title = p.get("title").and_then(|v| v.as_str());
-                        let linkedin_url = p.get("linkedinUrl").and_then(|v| v.as_str());
-                        let management_level = p.get("managementLevel").and_then(|v| v.as_str());
-                        let year_joined = p.get("yearJoined").and_then(|v| v.as_i64());
-
-                        tx.execute(
-                            "INSERT INTO people (
-                                first_name, last_name, email, email_source, email_status,
-                                apollo_person_id, title, linkedin_url, management_level,
-                                year_joined, lead_id, research_status, user_status, created_at
-                             )
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'pending', 'new', ?12)",
-                            rusqlite::params![
-                                first_name,
-                                last_name,
-                                email,
-                                email_source,
-                                email_status,
-                                apollo_person_id,
-                                title,
-                                linkedin_url,
-                                management_level,
-                                year_joined,
-                                lead_id,
-                                now
-                            ],
-                        ).map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
-                    }
+                    upsert_company_people(tx, lead_id, people_data)?;
                 }
 
                 // Update lead with company profile
@@ -555,36 +465,7 @@ impl CompletionHandler {
 
     /// Cleanup output files after database is confirmed updated
     fn cleanup_files(&self, metadata: &JobMetadata) -> Result<(), CompletionError> {
-        let primary_path = &metadata.primary_output_path;
-
-        // For research jobs, delete the entire directory
-        if matches!(
-            metadata.job_type,
-            JobType::CompanyResearch | JobType::PersonResearch
-        ) {
-            if let Some(parent) = primary_path.parent() {
-                if parent.exists() {
-                    if let Err(e) = fs::remove_dir_all(parent) {
-                        eprintln!(
-                            "[completion_handler] Warning: Failed to cleanup directory {:?}: {}",
-                            parent, e
-                        );
-                    }
-                }
-            }
-        } else {
-            // For other jobs, just delete the output file
-            if primary_path.exists() {
-                if let Err(e) = fs::remove_file(primary_path) {
-                    eprintln!(
-                        "[completion_handler] Warning: Failed to cleanup file {:?}: {}",
-                        primary_path, e
-                    );
-                }
-            }
-        }
-
-        Ok(())
+        cleanup_output_files(metadata)
     }
 
     /// Emit completion events for frontend cache invalidation
@@ -658,7 +539,319 @@ impl CompletionHandler {
     }
 }
 
+fn verify_output_files_for_metadata(
+    metadata: &JobMetadata,
+) -> Result<VerifiedOutputs, CompletionError> {
+    let primary_path = &metadata.primary_output_path;
+
+    // Check primary file exists
+    if !primary_path.exists() {
+        return Err(CompletionError::FileNotFound(primary_path.clone()));
+    }
+
+    // Read primary content
+    let primary_content = fs::read_to_string(primary_path)
+        .map_err(|e| CompletionError::FileReadError(primary_path.clone(), e))?;
+
+    // Validate primary content is not empty
+    if primary_content.trim().is_empty() {
+        return Err(CompletionError::ValidationError(format!(
+            "Primary output file is empty: {:?}",
+            primary_path
+        )));
+    }
+
+    // Read secondary content if path provided
+    let secondary_content = if let Some(secondary_path) = &metadata.secondary_output_path {
+        if secondary_path.exists() {
+            let content = fs::read_to_string(secondary_path)
+                .map_err(|e| CompletionError::FileReadError(secondary_path.clone(), e))?;
+            if matches!(metadata.job_type, JobType::CompanyResearch) && content.trim().is_empty() {
+                return Err(CompletionError::ValidationError(format!(
+                    "Company people output file is empty: {:?}",
+                    secondary_path
+                )));
+            }
+            Some(content)
+        } else if matches!(metadata.job_type, JobType::CompanyResearch) {
+            return Err(CompletionError::FileNotFound(secondary_path.clone()));
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Read enrichment content if path provided (optional, don't fail if missing)
+    let enrichment_content = if let Some(enrichment_path) = &metadata.enrichment_output_path {
+        if enrichment_path.exists() {
+            match fs::read_to_string(enrichment_path) {
+                Ok(content) => Some(content),
+                Err(e) => {
+                    eprintln!(
+                        "[completion_handler] Warning: Failed to read enrichment file {:?}: {}",
+                        enrichment_path, e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(VerifiedOutputs {
+        primary_content,
+        secondary_content,
+        enrichment_content,
+    })
+}
+
+fn parse_company_people_json(people_json: &str) -> Result<Vec<serde_json::Value>, CompletionError> {
+    serde_json::from_str::<Vec<serde_json::Value>>(people_json)
+        .map_err(|e| CompletionError::ParseError(format!("people.json: {}", e)))
+}
+
 /// Helper to extract first name from people JSON
+fn upsert_company_people(
+    tx: &rusqlite::Transaction,
+    lead_id: i64,
+    people_data: &[serde_json::Value],
+) -> Result<(), CompletionError> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut retained_ids = Vec::with_capacity(people_data.len());
+
+    for p in people_data {
+        let first_name = extract_first_name(p);
+        let last_name = extract_last_name(p);
+        let email = optional_str(p, "email");
+        let email_source = optional_str(p, "emailSource");
+        let email_status = optional_str(p, "emailStatus");
+        let apollo_person_id = optional_str(p, "apolloPersonId");
+        let title = optional_str(p, "title");
+        let linkedin_url = optional_str(p, "linkedinUrl");
+        let management_level = optional_str(p, "managementLevel");
+        let year_joined = p.get("yearJoined").and_then(|v| v.as_i64());
+
+        if let Some(existing_id) = find_existing_person_id(
+            tx,
+            lead_id,
+            apollo_person_id.as_deref(),
+            linkedin_url.as_deref(),
+            &first_name,
+            &last_name,
+            title.as_deref(),
+        )? {
+            tx.execute(
+                "UPDATE people
+                 SET first_name = ?1,
+                     last_name = ?2,
+                     email = CASE
+                         WHEN (email IS NULL OR trim(email) = '') AND ?3 IS NOT NULL THEN ?3
+                         ELSE email
+                     END,
+                     email_source = CASE
+                         WHEN (email_source IS NULL OR trim(email_source) = '') AND (email IS NULL OR trim(email) = '') AND ?3 IS NOT NULL THEN ?4
+                         ELSE email_source
+                     END,
+                     email_status = CASE
+                         WHEN (email_status IS NULL OR trim(email_status) = '') AND (email IS NULL OR trim(email) = '') AND ?3 IS NOT NULL THEN ?5
+                         ELSE email_status
+                     END,
+                     apollo_person_id = COALESCE(NULLIF(apollo_person_id, ''), ?6),
+                     title = COALESCE(?7, title),
+                     linkedin_url = COALESCE(?8, linkedin_url),
+                     management_level = COALESCE(?9, management_level),
+                     year_joined = COALESCE(?10, year_joined)
+                 WHERE id = ?11",
+                rusqlite::params![
+                    first_name,
+                    last_name,
+                    email,
+                    email_source,
+                    email_status,
+                    apollo_person_id,
+                    title,
+                    linkedin_url,
+                    management_level,
+                    year_joined,
+                    existing_id
+                ],
+            )
+            .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
+            retained_ids.push(existing_id);
+        } else {
+            tx.execute(
+                "INSERT INTO people (
+                    first_name, last_name, email, email_source, email_status,
+                    apollo_person_id, title, linkedin_url, management_level,
+                    year_joined, lead_id, research_status, user_status, created_at
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'pending', 'new', ?12)",
+                rusqlite::params![
+                    first_name,
+                    last_name,
+                    email,
+                    email_source,
+                    email_status,
+                    apollo_person_id,
+                    title,
+                    linkedin_url,
+                    management_level,
+                    year_joined,
+                    lead_id,
+                    now
+                ],
+            )
+            .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
+            retained_ids.push(tx.last_insert_rowid());
+        }
+    }
+
+    delete_people_omitted_by_latest_research(tx, lead_id, &retained_ids)?;
+    Ok(())
+}
+
+fn delete_people_omitted_by_latest_research(
+    tx: &rusqlite::Transaction,
+    lead_id: i64,
+    retained_ids: &[i64],
+) -> Result<(), CompletionError> {
+    if retained_ids.is_empty() {
+        tx.execute(
+            "DELETE FROM people WHERE lead_id = ?1",
+            rusqlite::params![lead_id],
+        )
+        .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
+        return Ok(());
+    }
+
+    let placeholders = std::iter::repeat_n("?", retained_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "DELETE FROM people WHERE lead_id = ? AND id NOT IN ({})",
+        placeholders
+    );
+    let params = std::iter::once(lead_id).chain(retained_ids.iter().copied());
+    tx.execute(&sql, rusqlite::params_from_iter(params))
+        .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
+    Ok(())
+}
+
+fn find_existing_person_id(
+    tx: &rusqlite::Transaction,
+    lead_id: i64,
+    apollo_person_id: Option<&str>,
+    linkedin_url: Option<&str>,
+    first_name: &str,
+    last_name: &str,
+    title: Option<&str>,
+) -> Result<Option<i64>, CompletionError> {
+    if let Some(apollo_person_id) = apollo_person_id.filter(|value| !value.trim().is_empty()) {
+        if let Some(id) = unique_person_id(
+            tx,
+            "SELECT id FROM people WHERE lead_id = ?1 AND apollo_person_id = ?2 LIMIT 2",
+            rusqlite::params![lead_id, apollo_person_id],
+        )? {
+            return Ok(Some(id));
+        }
+    }
+
+    if let Some(linkedin_url) = linkedin_url.filter(|value| !value.trim().is_empty()) {
+        if let Some(id) = unique_person_id(
+            tx,
+            "SELECT id FROM people WHERE lead_id = ?1 AND lower(linkedin_url) = lower(?2) LIMIT 2",
+            rusqlite::params![lead_id, linkedin_url],
+        )? {
+            return Ok(Some(id));
+        }
+    }
+
+    let name_only_ids = matching_person_ids(
+        tx,
+        "SELECT id FROM people
+         WHERE lead_id = ?1
+           AND lower(first_name) = lower(?2)
+           AND lower(last_name) = lower(?3)
+         LIMIT 2",
+        vec![
+            lead_id.to_string(),
+            first_name.to_string(),
+            last_name.to_string(),
+        ],
+    )?;
+    if name_only_ids.len() == 1 {
+        return Ok(Some(name_only_ids[0]));
+    }
+
+    let Some(title) = title.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let title_ids = matching_person_ids(
+        tx,
+        "SELECT id FROM people
+         WHERE lead_id = ?1
+           AND lower(first_name) = lower(?2)
+           AND lower(last_name) = lower(?3)
+           AND lower(COALESCE(title, '')) = lower(?4)
+         LIMIT 2",
+        vec![
+            lead_id.to_string(),
+            first_name.to_string(),
+            last_name.to_string(),
+            title.to_string(),
+        ],
+    )?;
+    Ok((title_ids.len() == 1).then_some(title_ids[0]))
+}
+
+fn matching_person_ids(
+    tx: &rusqlite::Transaction,
+    sql: &str,
+    params: Vec<String>,
+) -> Result<Vec<i64>, CompletionError> {
+    let mut stmt = tx
+        .prepare(sql)
+        .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| CompletionError::DatabaseError(e.to_string()))
+}
+
+fn unique_person_id<P>(
+    tx: &rusqlite::Transaction,
+    sql: &str,
+    params: P,
+) -> Result<Option<i64>, CompletionError>
+where
+    P: rusqlite::Params,
+{
+    let mut stmt = tx
+        .prepare(sql)
+        .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
+    let ids = stmt
+        .query_map(params, |row| row.get::<_, i64>(0))
+        .map_err(|e| CompletionError::DatabaseError(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
+    Ok((ids.len() == 1).then_some(ids[0]))
+}
+
+fn optional_str(p: &serde_json::Value, key: &str) -> Option<String> {
+    p.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn extract_first_name(p: &serde_json::Value) -> String {
     if let Some(fn_val) = p.get("firstName").and_then(|v| v.as_str()) {
         fn_val.to_string()
@@ -679,5 +872,212 @@ fn extract_last_name(p: &serde_json::Value) -> String {
         parts.get(1..).unwrap_or(&[]).join(" ")
     } else {
         String::new()
+    }
+}
+
+fn cleanup_output_files(metadata: &JobMetadata) -> Result<(), CompletionError> {
+    let primary_path = &metadata.primary_output_path;
+
+    // For research jobs, delete the entire directory because the prompt writes
+    // a coordinated artifact set there. Leaving one stale file can corrupt a rerun.
+    if matches!(
+        metadata.job_type,
+        JobType::CompanyResearch | JobType::PersonResearch
+    ) {
+        if let Some(parent) = primary_path.parent() {
+            if parent.exists() {
+                if let Err(e) = fs::remove_dir_all(parent) {
+                    eprintln!(
+                        "[completion_handler] Warning: Failed to cleanup directory {:?}: {}",
+                        parent, e
+                    );
+                }
+            }
+        }
+    } else if primary_path.exists() {
+        // For other jobs, just delete the output file.
+        if let Err(e) = fs::remove_file(primary_path) {
+            eprintln!(
+                "[completion_handler] Warning: Failed to cleanup file {:?}: {}",
+                primary_path, e
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    fn people_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE people (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER,
+                first_name TEXT NOT NULL,
+                last_name TEXT NOT NULL,
+                email TEXT,
+                email_source TEXT,
+                email_status TEXT,
+                apollo_person_id TEXT,
+                title TEXT,
+                management_level TEXT,
+                linkedin_url TEXT,
+                year_joined INTEGER,
+                person_profile TEXT,
+                research_status TEXT DEFAULT 'pending',
+                researched_at INTEGER,
+                user_status TEXT DEFAULT 'new',
+                conversation_topics TEXT,
+                conversation_generated_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn company_people_upsert_preserves_existing_research_state() {
+        let mut conn = people_test_conn();
+        conn.execute(
+            "INSERT INTO people (
+                id, lead_id, first_name, last_name, email, email_source, title, linkedin_url,
+                person_profile, research_status, user_status, conversation_topics,
+                conversation_generated_at, created_at
+             ) VALUES (1, 7, 'Ada', 'Lovelace', 'ada@manual.example', 'manual', 'VP Eng',
+                'https://linkedin.com/in/ada', 'researched profile', 'completed', 'qualified',
+                'talk about data platform', 1700000000000, 1699999999000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO people (
+                id, lead_id, first_name, last_name, email, email_source, title, linkedin_url,
+                person_profile, research_status, user_status, conversation_topics,
+                conversation_generated_at, created_at
+             ) VALUES (2, 7, 'Bob', 'Stale', 'bob@old.example', 'manual', 'VP Sales',
+                'https://linkedin.com/in/bob', 'old profile', 'completed', 'qualified',
+                'old conversation', 1700000000000, 1699999999000)",
+            [],
+        )
+        .unwrap();
+
+        let people = vec![json!({
+            "firstName": "Ada",
+            "lastName": "Lovelace",
+            "email": "ada@apollo.example",
+            "emailSource": "apollo",
+            "emailStatus": "verified",
+            "title": "Chief Technology Officer",
+            "linkedinUrl": "https://linkedin.com/in/ada",
+            "managementLevel": "C-Level"
+        })];
+
+        let tx = conn.transaction().unwrap();
+        upsert_company_people(&tx, 7, &people).unwrap();
+        tx.commit().unwrap();
+
+        let row = conn
+            .query_row(
+                "SELECT id, email, email_source, title, management_level, person_profile,
+                        research_status, user_status, conversation_topics
+                 FROM people WHERE lead_id = 7",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1.as_deref(), Some("ada@manual.example"));
+        assert_eq!(row.2.as_deref(), Some("manual"));
+        assert_eq!(row.3.as_deref(), Some("Chief Technology Officer"));
+        assert_eq!(row.4.as_deref(), Some("C-Level"));
+        assert_eq!(row.5.as_deref(), Some("researched profile"));
+        assert_eq!(row.6, "completed");
+        assert_eq!(row.7, "qualified");
+        assert_eq!(row.8.as_deref(), Some("talk about data platform"));
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM people WHERE lead_id = 7", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn failed_research_cleanup_removes_stale_artifact_directory() {
+        let dir = std::env::temp_dir().join(format!("augur-stale-output-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = dir.join("company_profile.md");
+        let people = dir.join("people.json");
+        let enrichment = dir.join("enrichment.json");
+        std::fs::write(&profile, "stale profile").unwrap();
+        std::fs::write(&people, "[]").unwrap();
+        std::fs::write(&enrichment, "{}").unwrap();
+
+        let metadata = JobMetadata {
+            job_type: JobType::CompanyResearch,
+            entity_id: 7,
+            research_depth: Some("deep".to_string()),
+            primary_output_path: profile,
+            secondary_output_path: Some(people),
+            enrichment_output_path: Some(enrichment),
+        };
+
+        cleanup_output_files(&metadata).unwrap();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn company_research_requires_valid_people_json() {
+        let dir =
+            std::env::temp_dir().join(format!("augur-required-people-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = dir.join("company_profile.md");
+        let people = dir.join("people.json");
+        let enrichment = dir.join("enrichment.json");
+        std::fs::write(&profile, "fresh profile").unwrap();
+
+        let metadata = JobMetadata {
+            job_type: JobType::CompanyResearch,
+            entity_id: 7,
+            research_depth: Some("deep".to_string()),
+            primary_output_path: profile.clone(),
+            secondary_output_path: Some(people.clone()),
+            enrichment_output_path: Some(enrichment),
+        };
+
+        let missing = verify_output_files_for_metadata(&metadata);
+        assert!(matches!(
+            missing,
+            Err(CompletionError::FileNotFound(path)) if path == people
+        ));
+
+        std::fs::write(&people, "{not-json").unwrap();
+        let outputs = verify_output_files_for_metadata(&metadata).unwrap();
+        assert!(parse_company_people_json(outputs.secondary_content.as_ref().unwrap()).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

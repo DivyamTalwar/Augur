@@ -1,4 +1,4 @@
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, Channel } from "@tauri-apps/api/core";
 import type {
   Lead,
   NewLead,
@@ -17,6 +17,102 @@ import type {
   Job,
   JobLog,
 } from "./types";
+
+type TauriWindow = Window & { __TAURI_INTERNALS__?: unknown };
+
+export function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in (window as TauriWindow);
+}
+
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (isTauriRuntime()) {
+    return tauriInvoke<T>(command, args);
+  }
+
+  const fallback = browserFallback<T>(command, args);
+  if (fallback.handled) {
+    return Promise.resolve(fallback.value);
+  }
+
+  return Promise.reject(new Error(`Tauri backend unavailable for command: ${command}`));
+}
+
+function browserFallback<T>(
+  command: string,
+  args?: Record<string, unknown>
+): { handled: true; value: T } | { handled: false; value?: never } {
+  const now = Date.now();
+  const emptyAdjacent = {
+    prevLead: null,
+    nextLead: null,
+    currentIndex: 0,
+    total: 0,
+  };
+  const settings = {
+    useChrome: false,
+    orchestrationEnabled: false,
+    defaultResearchDepth: "light",
+    apolloEnabled: false,
+    apolloMaxContacts: 10,
+    deepJobConcurrency: 1,
+    dailyBudgetUsdCents: null,
+    updatedAt: now,
+  };
+
+  switch (command) {
+    case "get_all_leads":
+    case "get_leads_with_scores":
+    case "get_unscored_leads":
+    case "get_all_people":
+    case "get_people_for_lead":
+    case "get_active_jobs":
+    case "get_jobs_active":
+    case "get_jobs_recent":
+    case "get_job_logs_cmd":
+      return { handled: true, value: [] as T };
+    case "get_lead":
+    case "get_person":
+    case "get_person_raw":
+    case "get_prompt_by_type":
+    case "get_active_scoring_config":
+    case "get_lead_score":
+    case "get_job_by_id":
+      return { handled: true, value: null as T };
+    case "get_adjacent_leads":
+    case "get_adjacent_people":
+      return { handled: true, value: emptyAdjacent as T };
+    case "get_onboarding_status":
+      return {
+        handled: true,
+        value: {
+          hasCompanyOverview: true,
+          hasLead: false,
+          hasResearchedLead: false,
+          hasScoredLead: false,
+          hasResearchedPerson: false,
+          hasConversationTopics: false,
+        } as T,
+      };
+    case "get_settings":
+      return { handled: true, value: settings as T };
+    case "get_apollo_key_status":
+      return { handled: true, value: { configured: false, source: "none" } as T };
+    case "cleanup_old_jobs_cmd":
+    case "delete_leads":
+    case "delete_people":
+      return { handled: true, value: 0 as T };
+    case "update_settings":
+    case "update_orchestration_settings":
+    case "clear_apollo_api_key":
+    case "kill_job":
+      return { handled: true, value: undefined as T };
+    default:
+      if (args) {
+        void args;
+      }
+      return { handled: false };
+  }
+}
 
 // ============================================================================
 // Lead Commands

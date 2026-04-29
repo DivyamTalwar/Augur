@@ -5,6 +5,7 @@ import { enableMapSet } from "immer";
 import { open } from "@tauri-apps/plugin-shell";
 import App from "./App";
 import "./globals.css";
+import { isTauriRuntime } from "@/lib/tauri/commands";
 
 // Enable Immer MapSet plugin for Zustand stores that use Map/Set
 enableMapSet();
@@ -16,6 +17,9 @@ document.addEventListener("click", (e) => {
 
   const href = anchor.getAttribute("href");
   if (href?.startsWith("http://") || href?.startsWith("https://")) {
+    if (!isTauriRuntime()) {
+      return;
+    }
     e.preventDefault();
     open(href);
   }

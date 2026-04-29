@@ -13,6 +13,8 @@ import { ClientLogEntry, LogEntryType } from "@/lib/types/claude";
 import { cn } from "@/lib/utils";
 import { CostPill } from "./cost-pill";
 
+const EMPTY_LOGS: ClientLogEntry[] = [];
+
 /**
  * AgentDock — collapsible bottom panel matching augur-os.html `.agent-dock`.
  * Replaces the old StreamPanel chrome. Reuses existing stream hooks.
@@ -22,7 +24,9 @@ export function AgentDock() {
   const toggle = useStreamPanelStore((s) => s.toggle);
   const activeTabId = useStreamPanelStore((s) => s.activeTabId);
   const setActiveTab = useStreamPanelStore((s) => s.setActiveTab);
-  const activeLogs = useStreamPanelStore((s) => (activeTabId ? (s.jobLogs.get(activeTabId) ?? []) : []));
+  const activeLogs = useStreamPanelStore((s) =>
+    activeTabId ? (s.jobLogs.get(activeTabId) ?? EMPTY_LOGS) : EMPTY_LOGS
+  );
 
   const { tabs } = useStreamTabs();
   const { killJob, closeTab } = useStreamSubscription();
@@ -93,7 +97,7 @@ export function AgentDock() {
       <button
         type="button"
         onClick={toggle}
-        className="relative w-full flex items-center gap-3 px-9 py-3 cursor-pointer h-12 flex-shrink-0 select-none"
+        className="relative w-full flex items-center gap-3 px-4 py-3 cursor-pointer h-12 flex-shrink-0 select-none md:px-9"
       >
         <DockPulse running={runningCount > 0} />
         <div className="flex items-center gap-2.5 text-[13px] font-semibold text-ink truncate">
@@ -106,7 +110,7 @@ export function AgentDock() {
           )}
         </div>
 
-        <div className="ml-auto flex items-center gap-4 font-mono text-[11px] text-ink-3">
+        <div className="ml-auto flex items-center gap-2 font-mono text-[11px] text-ink-3 md:gap-4">
           <CostPill logs={activeLogs} />
           <span>
             <b className="font-semibold text-ink">

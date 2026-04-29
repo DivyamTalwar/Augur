@@ -1,0 +1,403 @@
+pub mod queries;
+pub mod schema;
+pub mod seed;
+
+use rusqlite::{Connection, Result as SqliteResult};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+pub use queries::*;
+pub use schema::*;
+
+/// Database state managed by Tauri
+/// Uses Arc<Mutex<Connection>> for safe sharing across async tasks
+pub struct DbState {
+    pub conn: Arc<Mutex<Connection>>,
+}
+
+impl DbState {
+    pub fn new(db_path: PathBuf) -> SqliteResult<Self> {
+        // Ensure parent directory exists
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+
+        let conn = Connection::open(&db_path)?;
+
+        // Enable WAL mode for better concurrency
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+
+        // Initialize schema
+        init_schema(&conn)?;
+
+        // Seed default data (idempotent)
+        seed::seed_defaults(&conn)?;
+
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+}
+
+/// Initialize the database schema
+fn init_schema(conn: &Connection) -> SqliteResult<()> {
+    // Create tables first
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS leads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_name TEXT NOT NULL,
+            website TEXT,
+            industry TEXT,
+            sub_industry TEXT,
+            employees INTEGER,
+            employee_range TEXT,
+            revenue REAL,
+            revenue_range TEXT,
+            company_linkedin_url TEXT,
+            city TEXT,
+            state TEXT,
+            country TEXT,
+            research_status TEXT DEFAULT 'pending',
+            researched_at INTEGER,
+            user_status TEXT DEFAULT 'new',
+            created_at INTEGER NOT NULL,
+            company_profile TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS people (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+            first_name TEXT NOT NULL,
+            last_name TEXT NOT NULL,
+            email TEXT,
+            email_source TEXT,
+            email_status TEXT,
+            apollo_person_id TEXT,
+            title TEXT,
+            management_level TEXT,
+            linkedin_url TEXT,
+            year_joined INTEGER,
+            person_profile TEXT,
+            research_status TEXT DEFAULT 'pending',
+            researched_at INTEGER,
+            user_status TEXT DEFAULT 'new',
+            conversation_topics TEXT,
+            conversation_generated_at INTEGER,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS prompts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL DEFAULT 'company',
+            content TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS scoring_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT 'default',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            required_characteristics TEXT NOT NULL,
+            demand_signifiers TEXT NOT NULL,
+            tier_hot_min INTEGER NOT NULL DEFAULT 80,
+            tier_warm_min INTEGER NOT NULL DEFAULT 50,
+            tier_nurture_min INTEGER NOT NULL DEFAULT 30,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS lead_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+            config_id INTEGER NOT NULL REFERENCES scoring_config(id),
+            passes_requirements INTEGER NOT NULL,
+            requirement_results TEXT NOT NULL,
+            total_score INTEGER NOT NULL,
+            score_breakdown TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            scoring_notes TEXT,
+            scored_at INTEGER,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_people_lead_id ON people(lead_id);
+        CREATE INDEX IF NOT EXISTS idx_lead_scores_lead_id ON lead_scores(lead_id);
+        CREATE INDEX IF NOT EXISTS idx_prompts_type ON prompts(type);
+
+        -- Jobs table for persisting streaming job state
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            entity_id INTEGER NOT NULL,
+            entity_label TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            prompt TEXT NOT NULL,
+            model TEXT,
+            working_dir TEXT NOT NULL,
+            output_path TEXT,
+            exit_code INTEGER,
+            error_message TEXT,
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER,
+            pid INTEGER,
+            claude_session_id TEXT,
+            claude_model TEXT,
+            last_event_index INTEGER DEFAULT 0,
+            stdout_truncated INTEGER DEFAULT 0,
+            stderr_truncated INTEGER DEFAULT 0,
+            total_stdout_bytes INTEGER DEFAULT 0,
+            total_stderr_bytes INTEGER DEFAULT 0,
+            completion_state TEXT DEFAULT NULL
+        );
+
+        -- Job logs table for persisting stream output
+        CREATE TABLE IF NOT EXISTS job_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            log_type TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tool_name TEXT,
+            timestamp INTEGER NOT NULL,
+            sequence INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'stdout'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_job_logs_job_id ON job_logs(job_id);
+        CREATE INDEX IF NOT EXISTS idx_job_logs_sequence ON job_logs(job_id, sequence);
+
+        CREATE TABLE IF NOT EXISTS apollo_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT,
+            lead_id INTEGER,
+            endpoint TEXT NOT NULL,
+            requested_count INTEGER NOT NULL DEFAULT 0,
+            enriched_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS apollo_cache (
+            cache_key TEXT PRIMARY KEY,
+            response_json TEXT NOT NULL,
+            email TEXT,
+            email_status TEXT,
+            apollo_person_id TEXT,
+            expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_apollo_usage_job_id ON apollo_usage(job_id);
+        CREATE INDEX IF NOT EXISTS idx_apollo_usage_lead_id ON apollo_usage(lead_id);
+        CREATE INDEX IF NOT EXISTS idx_apollo_cache_expires_at ON apollo_cache(expires_at);
+
+        -- App settings table (single row)
+        -- `model` column retained for legacy DB compatibility; jobs always
+        -- invoke `claude-opus-4-6` at xhigh effort (see jobs/queue.rs).
+        CREATE TABLE IF NOT EXISTS settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            model TEXT NOT NULL DEFAULT 'claude-opus-4-6',
+            use_chrome INTEGER NOT NULL DEFAULT 0,
+            orchestration_enabled INTEGER NOT NULL DEFAULT 0,
+            default_research_depth TEXT NOT NULL DEFAULT 'light',
+            apollo_enabled INTEGER NOT NULL DEFAULT 0,
+            apollo_max_contacts INTEGER NOT NULL DEFAULT 10,
+            deep_job_concurrency INTEGER NOT NULL DEFAULT 1,
+            daily_budget_usd_cents INTEGER,
+            updated_at INTEGER NOT NULL
+        );
+
+        -- Insert default settings if not exists
+        INSERT OR IGNORE INTO settings (
+            id, model, use_chrome, orchestration_enabled, default_research_depth,
+            apollo_enabled, apollo_max_contacts, deep_job_concurrency,
+            daily_budget_usd_cents, updated_at
+        )
+        VALUES (1, 'claude-opus-4-6', 0, 0, 'light', 0, 10, 1, NULL, strftime('%s', 'now') * 1000);
+
+        "#,
+    )?;
+
+    // Run migrations for new columns
+    run_migrations(conn)?;
+
+    Ok(())
+}
+
+/// Run database migrations for new columns
+fn run_migrations(conn: &Connection) -> SqliteResult<()> {
+    // Helper to check if a column has NOT NULL constraint
+    fn column_has_notnull(conn: &Connection, table: &str, column: &str) -> bool {
+        let query = format!("PRAGMA table_info({})", table);
+        if let Ok(mut stmt) = conn.prepare(&query) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?, // column name at index 1
+                    row.get::<_, i64>(3)?,    // notnull flag at index 3
+                ))
+            }) {
+                for result in rows.flatten() {
+                    if result.0 == column {
+                        return result.1 != 0;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let query = format!("PRAGMA table_info({})", table);
+        if let Ok(mut stmt) = conn.prepare(&query) {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) {
+                for result in rows.flatten() {
+                    if result == column {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    // Migration: Fix people.lead_id NOT NULL constraint
+    // SQLite doesn't support ALTER TABLE to drop constraints, so we recreate the table
+    if column_has_notnull(conn, "people", "lead_id") {
+        eprintln!("[db] Migrating people table to remove NOT NULL constraint on lead_id");
+        conn.execute_batch(
+            r#"
+            -- Create new table with correct schema
+            CREATE TABLE people_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+                first_name TEXT NOT NULL,
+                last_name TEXT NOT NULL,
+                email TEXT,
+                email_source TEXT,
+                email_status TEXT,
+                apollo_person_id TEXT,
+                title TEXT,
+                management_level TEXT,
+                linkedin_url TEXT,
+                year_joined INTEGER,
+                person_profile TEXT,
+                research_status TEXT DEFAULT 'pending',
+                researched_at INTEGER,
+                user_status TEXT DEFAULT 'new',
+                conversation_topics TEXT,
+                conversation_generated_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
+
+            -- Copy existing data
+            INSERT INTO people_new (
+                id, lead_id, first_name, last_name, email, title, management_level,
+                linkedin_url, year_joined, person_profile, research_status, researched_at,
+                user_status, conversation_topics, conversation_generated_at, created_at
+            )
+            SELECT id, lead_id, first_name, last_name, email, title, management_level,
+                   linkedin_url, year_joined, person_profile, research_status, researched_at,
+                   user_status, conversation_topics, conversation_generated_at, created_at
+            FROM people;
+
+            -- Drop old table
+            DROP TABLE people;
+
+            -- Rename new table
+            ALTER TABLE people_new RENAME TO people;
+
+            -- Recreate index
+            CREATE INDEX IF NOT EXISTS idx_people_lead_id ON people(lead_id);
+            "#,
+        )?;
+        eprintln!("[db] Migration complete: people table updated");
+    }
+
+    let settings_columns = [
+        ("orchestration_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("default_research_depth", "TEXT NOT NULL DEFAULT 'light'"),
+        ("apollo_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("apollo_max_contacts", "INTEGER NOT NULL DEFAULT 10"),
+        ("deep_job_concurrency", "INTEGER NOT NULL DEFAULT 1"),
+        ("daily_budget_usd_cents", "INTEGER"),
+    ];
+
+    for (column, definition) in settings_columns {
+        if !column_exists(conn, "settings", column) {
+            conn.execute(
+                &format!("ALTER TABLE settings ADD COLUMN {} {}", column, definition),
+                [],
+            )?;
+        }
+    }
+
+    let people_columns = [
+        ("email_source", "TEXT"),
+        ("email_status", "TEXT"),
+        ("apollo_person_id", "TEXT"),
+    ];
+
+    for (column, definition) in people_columns {
+        if !column_exists(conn, "people", column) {
+            conn.execute(
+                &format!("ALTER TABLE people ADD COLUMN {} {}", column, definition),
+                [],
+            )?;
+        }
+    }
+
+    // Normalize legacy second-based timestamps to JavaScript-friendly milliseconds.
+    // This migration is idempotent: current millisecond values are above the cutoff.
+    conn.execute_batch(
+        r#"
+        UPDATE leads SET
+            researched_at = CASE WHEN researched_at IS NOT NULL AND researched_at > 0 AND researched_at < 1000000000000 THEN researched_at * 1000 ELSE researched_at END,
+            created_at = CASE WHEN created_at > 0 AND created_at < 1000000000000 THEN created_at * 1000 ELSE created_at END;
+
+        UPDATE people SET
+            researched_at = CASE WHEN researched_at IS NOT NULL AND researched_at > 0 AND researched_at < 1000000000000 THEN researched_at * 1000 ELSE researched_at END,
+            conversation_generated_at = CASE WHEN conversation_generated_at IS NOT NULL AND conversation_generated_at > 0 AND conversation_generated_at < 1000000000000 THEN conversation_generated_at * 1000 ELSE conversation_generated_at END,
+            created_at = CASE WHEN created_at > 0 AND created_at < 1000000000000 THEN created_at * 1000 ELSE created_at END;
+
+        UPDATE prompts SET
+            created_at = CASE WHEN created_at > 0 AND created_at < 1000000000000 THEN created_at * 1000 ELSE created_at END,
+            updated_at = CASE WHEN updated_at > 0 AND updated_at < 1000000000000 THEN updated_at * 1000 ELSE updated_at END;
+
+        UPDATE scoring_config SET
+            created_at = CASE WHEN created_at > 0 AND created_at < 1000000000000 THEN created_at * 1000 ELSE created_at END,
+            updated_at = CASE WHEN updated_at > 0 AND updated_at < 1000000000000 THEN updated_at * 1000 ELSE updated_at END;
+
+        UPDATE lead_scores SET
+            scored_at = CASE WHEN scored_at IS NOT NULL AND scored_at > 0 AND scored_at < 1000000000000 THEN scored_at * 1000 ELSE scored_at END,
+            created_at = CASE WHEN created_at > 0 AND created_at < 1000000000000 THEN created_at * 1000 ELSE created_at END;
+
+        UPDATE jobs SET
+            created_at = CASE WHEN created_at > 0 AND created_at < 1000000000000 THEN created_at * 1000 ELSE created_at END,
+            started_at = CASE WHEN started_at IS NOT NULL AND started_at > 0 AND started_at < 1000000000000 THEN started_at * 1000 ELSE started_at END,
+            completed_at = CASE WHEN completed_at IS NOT NULL AND completed_at > 0 AND completed_at < 1000000000000 THEN completed_at * 1000 ELSE completed_at END;
+
+        UPDATE job_logs SET
+            timestamp = CASE WHEN timestamp > 0 AND timestamp < 1000000000000 THEN timestamp * 1000 ELSE timestamp END;
+
+        UPDATE settings SET
+            updated_at = CASE WHEN updated_at > 0 AND updated_at < 1000000000000 THEN updated_at * 1000 ELSE updated_at END;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Get the default database path
+pub fn get_db_path() -> PathBuf {
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("augur-os");
+
+    data_dir.join("data.db")
+}

@@ -1,0 +1,1335 @@
+use crate::db::{self, DbState};
+use crate::events::{emit_lead_updated, emit_person_updated};
+use crate::jobs::{EntityContext, EntityType, JobMetadata, JobQueue, JobType, StreamEvent};
+use crate::prompts::get_default_prompt;
+use std::fs;
+use std::path::PathBuf;
+use tauri::{ipc::Channel, AppHandle, Manager, State};
+
+// ============================================================================
+// Research Commands
+// ============================================================================
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchResult {
+    pub job_id: String,
+    pub status: String,
+}
+
+#[tauri::command]
+pub async fn start_research(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    queue: State<'_, JobQueue>,
+    lead_id: i64,
+    custom_prompt: Option<String>,
+    research_depth: Option<String>,
+    on_event: Channel<StreamEvent>,
+) -> Result<ResearchResult, String> {
+    // Check for existing active job and cancel it if found
+    let existing_job_id = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        db::get_active_job_for_entity(&conn, lead_id, "company_research")
+            .map_err(|e| e.to_string())?
+            .map(|job| job.id)
+    };
+    if let Some(job_id) = existing_job_id {
+        eprintln!(
+            "[research] Cancelling existing job {} for lead {}",
+            job_id, lead_id
+        );
+        let _ = queue.kill_job(&job_id).await;
+    }
+
+    // Get lead
+    let lead = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        db::get_lead(&conn, lead_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Lead not found".to_string())?
+    };
+
+    // Update status to in_progress
+    {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE leads SET research_status = 'in_progress' WHERE id = ?1",
+            rusqlite::params![lead_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // Emit event so frontend updates immediately
+    emit_lead_updated(&app, lead_id);
+
+    // Get prompts (with fallback to defaults)
+    let (company_prompt_content, company_overview, settings) = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        let cp = db::get_prompt_by_type(&conn, "company").map_err(|e| e.to_string())?;
+        let co = db::get_prompt_by_type(&conn, "company_overview").map_err(|e| e.to_string())?;
+        let settings = db::get_settings(&conn).map_err(|e| e.to_string())?;
+
+        // Use DB prompt or fall back to default
+        let content = cp
+            .map(|p| p.content)
+            .or_else(|| get_default_prompt("company").map(String::from));
+        (content, co, settings)
+    };
+
+    let prompt_content = custom_prompt
+        .or(company_prompt_content)
+        .ok_or_else(|| "No company prompt configured".to_string())?;
+    let requested_depth = research_depth
+        .as_deref()
+        .map(crate::orchestration::ResearchDepth::from_name)
+        .unwrap_or_else(|| crate::orchestration::ResearchDepth::from_settings(&settings));
+    let orchestration_block =
+        if crate::orchestration::should_orchestrate(&settings, requested_depth) {
+            crate::orchestration::orchestration_prompt_block(requested_depth)
+        } else {
+            None
+        };
+
+    // Set up output directory
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let output_dir = data_dir.join("research");
+    fs::create_dir_all(&output_dir).ok();
+
+    let company_slug = lead
+        .company_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect::<String>();
+    let lead_dir = output_dir.join(format!("company_{}_{}", lead_id, company_slug));
+    fs::create_dir_all(&lead_dir).ok();
+
+    let profile_path = lead_dir.join("company_profile.md");
+    let people_path = lead_dir.join("people.json");
+    let enrichment_path = lead_dir.join("enrichment.json");
+
+    // Build prompt with file paths
+    let full_prompt = build_research_prompt(
+        &prompt_content,
+        &lead,
+        &profile_path,
+        &people_path,
+        &enrichment_path,
+        company_overview.as_ref().map(|p| p.content.as_str()),
+        orchestration_block.as_deref(),
+    );
+
+    // Send initial event (job_id is "pending" as actual job hasn't been created yet)
+    let _ = on_event.send(StreamEvent {
+        job_id: "pending".to_string(),
+        event_type: "info".to_string(),
+        content: format!("Starting research for {}...", lead.company_name),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    });
+
+    // Start job with callback
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    let metadata = JobMetadata {
+        job_type: JobType::CompanyResearch,
+        entity_id: lead_id,
+        research_depth,
+        primary_output_path: profile_path,
+        secondary_output_path: Some(people_path),
+        enrichment_output_path: Some(enrichment_path),
+    };
+
+    // Clone the app handle for the callback
+    let entity_label = lead.company_name.clone();
+
+    // Create entity context for status rollback on early failure
+    let entity_context = EntityContext {
+        entity_type: EntityType::Lead,
+        entity_id: lead_id,
+        rollback_status: "pending".to_string(),
+    };
+
+    // Note: CompletionHandler in queue.rs handles all database updates and file cleanup
+    // The callback is now just for any additional custom logic
+    let job_id = queue
+        .start_job_with_callback(
+            app.app_handle().clone(),
+            full_prompt,
+            working_dir,
+            on_event.clone(),
+            metadata,
+            entity_label,
+            Some(entity_context),
+            move |_meta, _output, _success| {
+                // CompletionHandler handles all completion logic
+            },
+        )
+        .await?;
+
+    Ok(ResearchResult {
+        job_id,
+        status: "started".to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn start_person_research(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    queue: State<'_, JobQueue>,
+    person_id: i64,
+    custom_prompt: Option<String>,
+    on_event: Channel<StreamEvent>,
+) -> Result<ResearchResult, String> {
+    // Check for existing active job and cancel it if found
+    let existing_job_id = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        db::get_active_job_for_entity(&conn, person_id, "person_research")
+            .map_err(|e| e.to_string())?
+            .map(|job| job.id)
+    };
+    if let Some(job_id) = existing_job_id {
+        eprintln!(
+            "[research] Cancelling existing job {} for person {}",
+            job_id, person_id
+        );
+        let _ = queue.kill_job(&job_id).await;
+    }
+
+    // Get person and optionally lead
+    let (person, lead) = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        let p = db::get_person_raw(&conn, person_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Person not found".to_string())?;
+        let l = if let Some(lead_id) = p.lead_id {
+            db::get_lead(&conn, lead_id).map_err(|e| e.to_string())?
+        } else {
+            None
+        };
+        (p, l)
+    };
+
+    // Update status to in_progress
+    {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE people SET research_status = 'in_progress' WHERE id = ?1",
+            rusqlite::params![person_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // Emit event so frontend updates immediately
+    emit_person_updated(&app, person_id, person.lead_id);
+
+    // Get prompts (with fallback to defaults)
+    let (person_prompt_content, company_overview) = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        let pp = db::get_prompt_by_type(&conn, "person").map_err(|e| e.to_string())?;
+        let co = db::get_prompt_by_type(&conn, "company_overview").map_err(|e| e.to_string())?;
+
+        // Use DB prompt or fall back to default
+        let content = pp
+            .map(|p| p.content)
+            .or_else(|| get_default_prompt("person").map(String::from));
+        (content, co)
+    };
+
+    let prompt_content = custom_prompt
+        .or(person_prompt_content)
+        .ok_or_else(|| "No person prompt configured".to_string())?;
+
+    // Set up output directory
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let output_dir = data_dir.join("research");
+    fs::create_dir_all(&output_dir).ok();
+
+    let person_slug = format!("{}_{}", person.first_name, person.last_name)
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect::<String>();
+    let person_dir = output_dir.join(format!("person_{}_{}", person_id, person_slug));
+    fs::create_dir_all(&person_dir).ok();
+
+    let profile_path = person_dir.join("person_profile.md");
+    let enrichment_path = person_dir.join("enrichment.json");
+
+    // Build prompt with file path
+    let full_prompt = build_person_research_prompt(
+        &prompt_content,
+        &person,
+        lead.as_ref(),
+        &profile_path,
+        &enrichment_path,
+        company_overview.as_ref().map(|p| p.content.as_str()),
+    );
+
+    let full_name = format!("{} {}", person.first_name, person.last_name);
+
+    // Send initial event (job_id is "pending" as actual job hasn't been created yet)
+    let _ = on_event.send(StreamEvent {
+        job_id: "pending".to_string(),
+        event_type: "info".to_string(),
+        content: format!("Starting research for {}...", full_name),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    });
+
+    // Start job with callback
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    let metadata = JobMetadata {
+        job_type: JobType::PersonResearch,
+        entity_id: person_id,
+        research_depth: None,
+        primary_output_path: profile_path,
+        secondary_output_path: None,
+        enrichment_output_path: Some(enrichment_path),
+    };
+
+    let entity_label = full_name.clone();
+
+    // Create entity context for status rollback on early failure
+    let entity_context = EntityContext {
+        entity_type: EntityType::Person,
+        entity_id: person_id,
+        rollback_status: "pending".to_string(),
+    };
+
+    // Note: CompletionHandler in queue.rs handles all database updates and file cleanup
+    let job_id = queue
+        .start_job_with_callback(
+            app.app_handle().clone(),
+            full_prompt,
+            working_dir,
+            on_event.clone(),
+            metadata,
+            entity_label,
+            Some(entity_context),
+            move |_meta, _output, _success| {
+                // CompletionHandler handles all completion logic
+            },
+        )
+        .await?;
+
+    Ok(ResearchResult {
+        job_id,
+        status: "started".to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn kill_job(
+    queue: State<'_, JobQueue>,
+    db_state: State<'_, crate::db::DbState>,
+    app: AppHandle,
+    job_id: String,
+) -> Result<(), String> {
+    // Try in-memory cancellation first
+    match queue.kill_job(&job_id).await {
+        Ok(()) => return Ok(()),
+        Err(_) => {
+            // Job not in active_jobs — it may be a stuck/orphaned job.
+            // Try to kill the process by PID from the database, then mark it cancelled.
+            eprintln!(
+                "[kill_job] job_id={} not in active_jobs, attempting DB cleanup",
+                job_id
+            );
+            let conn = db_state.conn.lock().map_err(|e| e.to_string())?;
+            if let Ok(Some(job)) = crate::db::get_job(&conn, &job_id) {
+                // Kill the process if we have a PID and it's still "running"
+                if let Some(pid) = job.pid {
+                    #[cfg(unix)]
+                    {
+                        use nix::sys::signal::{kill, Signal};
+                        use nix::unistd::Pid;
+                        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                    }
+                }
+                // Update DB status to cancelled
+                let _ = crate::db::update_job_status(
+                    &conn,
+                    &job_id,
+                    "cancelled",
+                    None,
+                    Some("Force-cancelled stuck job"),
+                );
+                // Reset entity status based on job type
+                let rollback_status = "pending";
+                match job.job_type.as_str() {
+                    "company_research" | "scoring" | "lead_finder" => {
+                        let _ = conn.execute(
+                            "UPDATE leads SET research_status = ?1 WHERE id = ?2",
+                            rusqlite::params![rollback_status, job.entity_id],
+                        );
+                        crate::events::emit_lead_updated(&app, job.entity_id);
+                    }
+                    "person_research" | "conversation" => {
+                        let _ = conn.execute(
+                            "UPDATE people SET research_status = ?1 WHERE id = ?2",
+                            rusqlite::params![rollback_status, job.entity_id],
+                        );
+                        if let Ok(Some(person)) = crate::db::get_person_raw(&conn, job.entity_id) {
+                            crate::events::emit_person_updated(&app, job.entity_id, person.lead_id);
+                        }
+                    }
+                    _ => {}
+                }
+                crate::events::emit_job_status_changed(&app, job_id, "cancelled".to_string(), None);
+                return Ok(());
+            }
+            Err("Job not found".to_string())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_active_jobs(queue: State<'_, JobQueue>) -> Result<Vec<String>, String> {
+    Ok(queue.get_active_jobs().await)
+}
+
+// ============================================================================
+// Prompt Builders
+// ============================================================================
+
+const PEOPLE_JSON_SCHEMA: &str = r#"
+The people JSON should be an array of objects with these fields:
+- firstName (string)
+- lastName (string)
+- email (string, optional)
+- title (string)
+- linkedinUrl (string, optional)
+- managementLevel (string, optional) - one of: C-Level, VP, Director, Manager, IC
+- yearJoined (number, optional) - the year they joined the company"#;
+
+const LEAD_ENRICHMENT_SCHEMA: &str = r#"This file should contain verified company data in JSON format. Only include fields where you have found reliable data:
+```json
+{
+  "website": "https://company.com",
+  "industry": "Technology",
+  "subIndustry": "Enterprise Software",
+  "employees": 500,
+  "employeeRange": "201-500",
+  "revenue": 50000000,
+  "revenueRange": "$10M-$50M",
+  "companyLinkedinUrl": "https://linkedin.com/company/...",
+  "city": "San Francisco",
+  "state": "California",
+  "country": "United States"
+}
+```
+
+IMPORTANT: Only include fields with verified data. Omit fields if uncertain."#;
+
+const PERSON_ENRICHMENT_SCHEMA: &str = r#"This file should contain verified person data in JSON format. Only include fields where you have found reliable data:
+```json
+{
+  "email": "name@company.com",
+  "title": "Senior Vice President of Sales",
+  "managementLevel": "VP",
+  "linkedinUrl": "https://linkedin.com/in/...",
+  "yearJoined": 2020
+}
+```
+
+Valid managementLevel values: C-Level, VP, Director, Manager, IC
+IMPORTANT: Only include fields with verified data. Omit fields if uncertain."#;
+
+fn build_research_prompt(
+    prompt: &str,
+    lead: &db::Lead,
+    profile_path: &std::path::Path,
+    people_path: &std::path::Path,
+    enrichment_path: &std::path::Path,
+    company_overview: Option<&str>,
+    orchestration_block: Option<&str>,
+) -> String {
+    let mut full_prompt = String::new();
+
+    // Add company overview context if available
+    if let Some(overview) = company_overview {
+        full_prompt.push_str(&format!("# Company Overview\n\n{}\n\n---\n\n", overview));
+    }
+
+    full_prompt.push_str(prompt);
+    full_prompt.push_str(&format!(
+        "\n\n# Company Information\n\nCompany Name: {}\n",
+        lead.company_name
+    ));
+
+    if let Some(website) = &lead.website {
+        full_prompt.push_str(&format!("Website: {}\n", website));
+    }
+    if let Some(industry) = &lead.industry {
+        full_prompt.push_str(&format!("Industry: {}\n", industry));
+    }
+    if let Some(city) = &lead.city {
+        full_prompt.push_str(&format!("City: {}\n", city));
+    }
+    if let Some(state) = &lead.state {
+        full_prompt.push_str(&format!("State: {}\n", state));
+    }
+    if let Some(country) = &lead.country {
+        full_prompt.push_str(&format!("Country: {}\n", country));
+    }
+    if let Some(employees) = &lead.employee_range {
+        full_prompt.push_str(&format!("Employees: {}\n", employees));
+    }
+
+    if let Some(block) = orchestration_block {
+        full_prompt.push_str("\n\n");
+        full_prompt.push_str(block);
+    }
+
+    full_prompt.push_str(&format!(
+        "\n# Output Files\n\nWrite the company profile to: {}\nWrite the people JSON to: {}\n{}\n",
+        profile_path.display(),
+        people_path.display(),
+        PEOPLE_JSON_SCHEMA
+    ));
+
+    full_prompt.push_str(&format!(
+        "\n# Enrichment Data\n\nAdditionally, write structured enrichment data to: {}\n\n{}\n",
+        enrichment_path.display(),
+        LEAD_ENRICHMENT_SCHEMA
+    ));
+
+    full_prompt
+}
+
+fn build_person_research_prompt(
+    prompt: &str,
+    person: &db::Person,
+    lead: Option<&db::Lead>,
+    profile_path: &std::path::Path,
+    enrichment_path: &std::path::Path,
+    company_overview: Option<&str>,
+) -> String {
+    let mut full_prompt = String::new();
+
+    // Add company overview context if available
+    if let Some(overview) = company_overview {
+        full_prompt.push_str(&format!("# Company Overview\n\n{}\n\n---\n\n", overview));
+    }
+
+    full_prompt.push_str(prompt);
+    full_prompt.push_str(&format!(
+        "\n\n# Person Information\n\nName: {} {}\n",
+        person.first_name, person.last_name
+    ));
+
+    if let Some(title) = &person.title {
+        full_prompt.push_str(&format!("Title: {}\n", title));
+    }
+    if let Some(email) = &person.email {
+        full_prompt.push_str(&format!("Email: {}\n", email));
+    }
+    if let Some(linkedin) = &person.linkedin_url {
+        full_prompt.push_str(&format!("LinkedIn: {}\n", linkedin));
+    }
+
+    // Add company information if available
+    if let Some(l) = lead {
+        full_prompt.push_str(&format!(
+            "\n# Company Information\n\nCompany: {}\n",
+            l.company_name
+        ));
+        if let Some(website) = &l.website {
+            full_prompt.push_str(&format!("Website: {}\n", website));
+        }
+    }
+
+    full_prompt.push_str(&format!(
+        "\n# Output Files\n\nWrite the person profile to: {}\n\nAdditionally, write structured enrichment data to: {}\n\n{}\n",
+        profile_path.display(),
+        enrichment_path.display(),
+        PERSON_ENRICHMENT_SCHEMA
+    ));
+
+    full_prompt
+}
+
+// ============================================================================
+// Find Leads Commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn start_find_leads(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    queue: State<'_, JobQueue>,
+    icp_description: String,
+    on_event: Channel<StreamEvent>,
+) -> Result<ResearchResult, String> {
+    // Get company overview for context
+    let company_overview = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        db::get_prompt_by_type(&conn, "company_overview").map_err(|e| e.to_string())?
+    };
+
+    // Set up output directory
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let output_dir = data_dir.join("lead_finder");
+    fs::create_dir_all(&output_dir).ok();
+
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let leads_path = output_dir.join(format!("leads_{}.json", timestamp));
+
+    // Build prompt
+    let full_prompt = build_find_leads_prompt(
+        &icp_description,
+        &leads_path,
+        company_overview.as_ref().map(|p| p.content.as_str()),
+    );
+
+    // Send initial event
+    let _ = on_event.send(StreamEvent {
+        job_id: "pending".to_string(),
+        event_type: "info".to_string(),
+        content: format!("Finding leads matching: {}...", icp_description),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    });
+
+    // Start job
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    let metadata = JobMetadata {
+        job_type: JobType::LeadFinder,
+        entity_id: 0,
+        research_depth: None,
+        primary_output_path: leads_path,
+        secondary_output_path: None,
+        enrichment_output_path: None,
+    };
+
+    let entity_label = format!(
+        "Find Leads: {}",
+        if icp_description.len() > 50 {
+            format!("{}...", &icp_description[..50])
+        } else {
+            icp_description.clone()
+        }
+    );
+
+    let job_id = queue
+        .start_job_with_callback(
+            app.app_handle().clone(),
+            full_prompt,
+            working_dir,
+            on_event.clone(),
+            metadata,
+            entity_label,
+            None, // No entity status to rollback
+            move |_meta, _output, _success| {
+                // CompletionHandler handles all completion logic
+            },
+        )
+        .await?;
+
+    Ok(ResearchResult {
+        job_id,
+        status: "started".to_string(),
+    })
+}
+
+fn build_find_leads_prompt(
+    icp_description: &str,
+    output_path: &std::path::Path,
+    company_overview: Option<&str>,
+) -> String {
+    let mut prompt = String::new();
+
+    if let Some(overview) = company_overview {
+        prompt.push_str(&format!("# About Our Company\n\n{}\n\n---\n\n", overview));
+    }
+
+    prompt.push_str(&format!(
+        r#"# Task: Find Companies Matching an Ideal Customer Profile
+
+## ICP Description
+{icp_description}
+
+## Instructions
+1. Search the web to find 10-20 real companies that match the ICP description above.
+2. For each company, gather: company name, website, city, state, country, and industry.
+3. Only include real companies that you can verify exist.
+4. Write the results as a JSON array to: {output_path}
+
+## Output Format
+Write ONLY a valid JSON array to the output file, with no additional text. Each element should have this structure:
+```json
+[
+  {{
+    "companyName": "Acme Corp",
+    "website": "https://acme.com",
+    "city": "San Francisco",
+    "state": "California",
+    "country": "United States",
+    "industry": "Enterprise Software"
+  }}
+]
+```
+
+Fields:
+- companyName (required): The company's name
+- website (optional): The company's website URL
+- city (optional): City where the company is headquartered
+- state (optional): State/province
+- country (optional): Country
+- industry (optional): The company's primary industry
+
+IMPORTANT: Write ONLY valid JSON to the output file. No markdown, no explanation, just the JSON array."#,
+        icp_description = icp_description,
+        output_path = output_path.display(),
+    ));
+
+    prompt
+}
+
+// ============================================================================
+// Scoring Commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn start_scoring(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    queue: State<'_, JobQueue>,
+    lead_id: i64,
+    on_event: Channel<StreamEvent>,
+) -> Result<ResearchResult, String> {
+    // Check for existing active job and cancel it if found
+    let existing_job_id = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        db::get_active_job_for_entity(&conn, lead_id, "scoring")
+            .map_err(|e| e.to_string())?
+            .map(|job| job.id)
+    };
+    if let Some(job_id) = existing_job_id {
+        eprintln!(
+            "[research] Cancelling existing scoring job {} for lead {}",
+            job_id, lead_id
+        );
+        let _ = queue.kill_job(&job_id).await;
+    }
+
+    // Get lead with people
+    let (lead, people) = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        let l = db::get_lead(&conn, lead_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Lead not found".to_string())?;
+        let p = db::get_people_for_lead(&conn, lead_id).map_err(|e| e.to_string())?;
+        (l, p)
+    };
+
+    // Get active scoring config
+    let config = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        db::get_active_scoring_config(&conn)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "No active scoring configuration found".to_string())?
+    };
+
+    // Set up output directory
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let output_dir = data_dir.join("scoring");
+    fs::create_dir_all(&output_dir).ok();
+
+    let company_slug = lead
+        .company_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect::<String>();
+    let score_path = output_dir.join(format!("score_{}_{}.json", lead_id, company_slug));
+
+    // Build scoring prompt
+    let full_prompt = build_scoring_prompt(&lead, &people, &config, &score_path);
+
+    // Send initial event (job_id is "pending" as actual job hasn't been created yet)
+    let _ = on_event.send(StreamEvent {
+        job_id: "pending".to_string(),
+        event_type: "info".to_string(),
+        content: format!("Starting scoring for {}...", lead.company_name),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    });
+
+    // Start job with callback
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    let metadata = JobMetadata {
+        job_type: JobType::Scoring,
+        entity_id: lead_id,
+        research_depth: None,
+        primary_output_path: score_path,
+        secondary_output_path: None,
+        enrichment_output_path: None,
+    };
+
+    let entity_label = format!("{} (Scoring)", lead.company_name);
+
+    // Note: Scoring jobs don't have a research_status to reset, so no entity context needed
+    // Note: CompletionHandler in queue.rs handles all database updates and file cleanup
+    let job_id = queue
+        .start_job_with_callback(
+            app.app_handle().clone(),
+            full_prompt,
+            working_dir,
+            on_event.clone(),
+            metadata,
+            entity_label,
+            None, // No entity status to rollback for scoring
+            move |_meta, _output, _success| {
+                // CompletionHandler handles all completion logic
+            },
+        )
+        .await?;
+
+    Ok(ResearchResult {
+        job_id,
+        status: "started".to_string(),
+    })
+}
+
+// ============================================================================
+// Conversation Generation Commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn start_conversation_generation(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    queue: State<'_, JobQueue>,
+    person_id: i64,
+    on_event: Channel<StreamEvent>,
+) -> Result<ResearchResult, String> {
+    // Check for existing active job and cancel it if found
+    let existing_job_id = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        db::get_active_job_for_entity(&conn, person_id, "conversation")
+            .map_err(|e| e.to_string())?
+            .map(|job| job.id)
+    };
+    if let Some(job_id) = existing_job_id {
+        eprintln!(
+            "[research] Cancelling existing conversation job {} for person {}",
+            job_id, person_id
+        );
+        let _ = queue.kill_job(&job_id).await;
+    }
+
+    // Get person and optionally lead
+    let (person, lead) = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        let p = db::get_person_raw(&conn, person_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Person not found".to_string())?;
+        let l = if let Some(lead_id) = p.lead_id {
+            db::get_lead(&conn, lead_id).map_err(|e| e.to_string())?
+        } else {
+            None
+        };
+        (p, l)
+    };
+
+    // Get prompts (with fallback to defaults)
+    let (conversation_prompt_content, company_overview) = {
+        let conn = state.conn.lock().map_err(|e| e.to_string())?;
+        let cp = db::get_prompt_by_type(&conn, "conversation_topics").map_err(|e| e.to_string())?;
+        let co = db::get_prompt_by_type(&conn, "company_overview").map_err(|e| e.to_string())?;
+
+        // Use DB prompt or fall back to default
+        let content = cp
+            .map(|p| p.content)
+            .or_else(|| get_default_prompt("conversation_topics").map(String::from));
+        (content, co)
+    };
+
+    let prompt_content = conversation_prompt_content
+        .ok_or_else(|| "No conversation topics prompt configured".to_string())?;
+
+    // Set up output directory
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let output_dir = data_dir.join("conversations");
+    fs::create_dir_all(&output_dir).ok();
+
+    let person_slug = format!("{}_{}", person.first_name, person.last_name)
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect::<String>();
+    let conversation_path =
+        output_dir.join(format!("conversation_{}_{}.md", person_id, person_slug));
+
+    // Build conversation prompt
+    let full_prompt = build_conversation_prompt(
+        &prompt_content,
+        &person,
+        lead.as_ref(),
+        &conversation_path,
+        company_overview.as_ref().map(|p| p.content.as_str()),
+    );
+
+    let full_name = format!("{} {}", person.first_name, person.last_name);
+
+    // Send initial event (job_id is "pending" as actual job hasn't been created yet)
+    let _ = on_event.send(StreamEvent {
+        job_id: "pending".to_string(),
+        event_type: "info".to_string(),
+        content: format!("Generating conversation topics for {}...", full_name),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    });
+
+    // Start job with callback
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+
+    let metadata = JobMetadata {
+        job_type: JobType::Conversation,
+        entity_id: person_id,
+        research_depth: None,
+        primary_output_path: conversation_path,
+        secondary_output_path: None,
+        enrichment_output_path: None,
+    };
+
+    let entity_label = format!("{} (Conversation)", full_name);
+
+    // Note: Conversation jobs don't have a research_status to reset, so no entity context needed
+    // Note: CompletionHandler in queue.rs handles all database updates and file cleanup
+    let job_id = queue
+        .start_job_with_callback(
+            app.app_handle().clone(),
+            full_prompt,
+            working_dir,
+            on_event.clone(),
+            metadata,
+            entity_label,
+            None, // No entity status to rollback for conversation
+            move |_meta, _output, _success| {
+                // CompletionHandler handles all completion logic
+            },
+        )
+        .await?;
+
+    Ok(ResearchResult {
+        job_id,
+        status: "started".to_string(),
+    })
+}
+
+// ============================================================================
+// Scoring Prompt Builder
+// ============================================================================
+
+fn build_scoring_prompt(
+    lead: &db::Lead,
+    people: &[db::Person],
+    config: &db::ParsedScoringConfig,
+    output_path: &std::path::Path,
+) -> String {
+    // Parse required characteristics and demand signifiers from JSON
+    let required_chars: Vec<serde_json::Value> = config
+        .required_characteristics
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let demand_sigs: Vec<serde_json::Value> = config
+        .demand_signifiers
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    // Filter enabled items
+    let enabled_reqs: Vec<_> = required_chars
+        .iter()
+        .filter(|c| c.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+        .collect();
+    let enabled_sigs: Vec<_> = demand_sigs
+        .iter()
+        .filter(|s| s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+        .collect();
+
+    // Calculate total weight
+    let total_weight: f64 = enabled_sigs
+        .iter()
+        .map(|s| s.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0))
+        .sum();
+
+    // Format lead context
+    let lead_context = format_lead_context(lead, people);
+
+    // Format required characteristics
+    let req_formatted = if enabled_reqs.is_empty() {
+        "No required characteristics defined.".to_string()
+    } else {
+        enabled_reqs
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                format!("{}. {}\n   - {}", i + 1, name, desc)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Format demand signifiers
+    let sig_formatted = if enabled_sigs.is_empty() {
+        "No demand signifiers defined.".to_string()
+    } else {
+        enabled_sigs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                let desc = s.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let weight = s.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let percentage = if total_weight > 0.0 {
+                    ((weight / total_weight) * 100.0).round() as i32
+                } else {
+                    0
+                };
+                format!(
+                    "{}. {} (Weight: {}/10, {}% of total score)\n   - {}",
+                    i + 1,
+                    name,
+                    weight as i32,
+                    percentage,
+                    desc
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Get IDs for JSON example
+    let req_ids: Vec<String> = enabled_reqs
+        .iter()
+        .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    let sig_ids: Vec<String> = enabled_sigs
+        .iter()
+        .filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+
+    // Example values for JSON
+    let example_req = enabled_reqs.first();
+    let example_sig = enabled_sigs.first();
+
+    let example_req_id = example_req
+        .and_then(|r| r.get("id").and_then(|v| v.as_str()))
+        .unwrap_or("req-id");
+    let example_req_name = example_req
+        .and_then(|r| r.get("name").and_then(|v| v.as_str()))
+        .unwrap_or("Requirement Name");
+
+    let example_sig_id = example_sig
+        .and_then(|s| s.get("id").and_then(|v| v.as_str()))
+        .unwrap_or("sig-id");
+    let example_sig_name = example_sig
+        .and_then(|s| s.get("name").and_then(|v| v.as_str()))
+        .unwrap_or("Signifier Name");
+    let example_sig_weight = example_sig
+        .and_then(|s| s.get("weight").and_then(|v| v.as_i64()))
+        .unwrap_or(5);
+
+    let example_weighted_score = if total_weight > 0.0 {
+        ((80.0 * example_sig_weight as f64) / total_weight).round() as i32
+    } else {
+        0
+    };
+
+    format!(
+        r#"You are a lead scoring analyst. Your task is to evaluate the following company as a sales lead and provide a detailed scoring assessment.
+
+COMPANY INFORMATION:
+{lead_context}
+
+SCORING CRITERIA:
+
+## Required Characteristics (Pass/Fail)
+These are gates that must be passed for a lead to be considered qualified. If ANY required characteristic fails, the lead will be classified as "disqualified" regardless of the demand signifier scores.
+
+{req_formatted}
+
+## Demand Signifiers (Weighted Scoring)
+Evaluate each of the following factors on a scale of 0-100. The final score is calculated as a weighted average.
+
+{sig_formatted}
+
+## Tier Thresholds
+- Hot: {}+ (highest priority leads)
+- Warm: {}-{} (good potential)
+- Nurture: {}-{} (needs development)
+- Disqualified: Below {} OR fails any required characteristic
+
+INSTRUCTIONS:
+
+1. First, evaluate each Required Characteristic:
+   - Research the company if needed using web search
+   - Determine if each requirement is PASSED or FAILED
+   - Provide a brief reason for each decision
+
+2. If all requirements pass, score each Demand Signifier:
+   - Research thoroughly to find evidence for each factor
+   - Assign a score from 0-100 based on the evidence
+   - Provide reasoning for each score
+
+3. Calculate the total weighted score using this formula:
+   Total Score = Sum of (signifier_score * weight) / total_weight
+
+4. Determine the tier based on:
+   - If any requirement fails: tier = "disqualified"
+   - Otherwise: based on total score and tier thresholds
+
+5. Write your complete assessment to the output file.
+
+OUTPUT FORMAT:
+Write a JSON file to: {}
+
+The JSON must have this exact structure:
+{{
+  "passesRequirements": true/false,
+  "requirementResults": [
+    {{
+      "id": "{}",
+      "name": "{}",
+      "passed": true/false,
+      "reason": "Explanation of why this passed or failed"
+    }}
+  ],
+  "totalScore": 75,
+  "scoreBreakdown": [
+    {{
+      "id": "{}",
+      "name": "{}",
+      "weight": {},
+      "score": 80,
+      "weightedScore": {},
+      "reason": "Explanation of the score"
+    }}
+  ],
+  "tier": "hot" | "warm" | "nurture" | "disqualified",
+  "scoringNotes": "Overall summary and key observations about this lead"
+}}
+
+IMPORTANT NOTES:
+- Be thorough in your research - use web search if company profile doesn't have enough information
+- Be objective and evidence-based in your scoring
+- The requirementResults array must include an entry for each enabled requirement: {}
+- The scoreBreakdown array must include an entry for each enabled signifier: {}
+- Calculate weightedScore as: (score * weight) / {}
+- If requirements fail, still include scoreBreakdown but totalScore should reflect the disqualified status
+- Write ONLY valid JSON to the output file, no additional text
+
+Begin your analysis now."#,
+        config.tier_hot_min,
+        config.tier_warm_min,
+        config.tier_hot_min - 1,
+        config.tier_nurture_min,
+        config.tier_warm_min - 1,
+        config.tier_nurture_min,
+        output_path.display(),
+        example_req_id,
+        example_req_name,
+        example_sig_id,
+        example_sig_name,
+        example_sig_weight,
+        example_weighted_score,
+        req_ids.join(", "),
+        sig_ids.join(", "),
+        total_weight as i32
+    )
+}
+
+// ============================================================================
+// Conversation Prompt Builder
+// ============================================================================
+
+fn build_conversation_prompt(
+    conversation_prompt: &str,
+    person: &db::Person,
+    lead: Option<&db::Lead>,
+    output_path: &std::path::Path,
+    company_overview: Option<&str>,
+) -> String {
+    // Format what we do section
+    let what_we_do = if let Some(overview) = company_overview {
+        format!("<WhatWeDo>\n{}\n</WhatWeDo>\n\n", overview)
+    } else {
+        String::new()
+    };
+
+    // Format person context
+    let person_context =
+        format!(
+        "Name: {} {}\nTitle: {}\nEmail: {}\nLinkedIn: {}\nManagement Level: {}\nYear Joined: {}",
+        person.first_name,
+        person.last_name,
+        person.title.as_deref().unwrap_or("N/A"),
+        person.email.as_deref().unwrap_or("N/A"),
+        person.linkedin_url.as_deref().unwrap_or("N/A"),
+        person.management_level.as_deref().unwrap_or("N/A"),
+        person.year_joined.map(|y| y.to_string()).unwrap_or_else(|| "N/A".to_string())
+    );
+
+    // Format lead context (handle optional lead)
+    let (lead_context, company_profile) = if let Some(l) = lead {
+        let context = format!(
+            "Company Name: {}\nWebsite: {}\nIndustry: {}\nSub-Industry: {}\nEmployees: {}\nEmployee Range: {}\nRevenue: {}\nRevenue Range: {}\nLinkedIn: {}\nCity: {}\nState: {}\nCountry: {}",
+            l.company_name,
+            l.website.as_deref().unwrap_or("N/A"),
+            l.industry.as_deref().unwrap_or("N/A"),
+            l.sub_industry.as_deref().unwrap_or("N/A"),
+            l.employees.map(|e| e.to_string()).unwrap_or_else(|| "N/A".to_string()),
+            l.employee_range.as_deref().unwrap_or("N/A"),
+            l.revenue.map(|r| r.to_string()).unwrap_or_else(|| "N/A".to_string()),
+            l.revenue_range.as_deref().unwrap_or("N/A"),
+            l.company_linkedin_url.as_deref().unwrap_or("N/A"),
+            l.city.as_deref().unwrap_or("N/A"),
+            l.state.as_deref().unwrap_or("N/A"),
+            l.country.as_deref().unwrap_or("N/A")
+        );
+        let profile = if let Some(profile) = &l.company_profile {
+            format!("\n\nCompany Research Profile:\n{}", profile)
+        } else {
+            String::new()
+        };
+        (context, profile)
+    } else {
+        ("No company associated".to_string(), String::new())
+    };
+
+    // Add person profile if available
+    let person_profile = if let Some(profile) = &person.person_profile {
+        format!("\n\nPerson Research Profile:\n{}", profile)
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"{}<TargetPerson>
+{}{}
+</TargetPerson>
+
+<TargetCompany>
+{}{}
+</TargetCompany>
+
+<ConversationInstructions>
+{}
+</ConversationInstructions>
+
+<OutputRequirements>
+Save conversation topics to: {}
+Format: Markdown document with talking points and engagement strategies.
+</OutputRequirements>
+"#,
+        what_we_do,
+        person_context,
+        person_profile,
+        lead_context,
+        company_profile,
+        conversation_prompt,
+        output_path.display()
+    )
+}
+
+// ============================================================================
+// Lead Context Formatter
+// ============================================================================
+
+fn format_lead_context(lead: &db::Lead, people: &[db::Person]) -> String {
+    let mut parts = vec![
+        format!("Company Name: {}", lead.company_name),
+        format!("Website: {}", lead.website.as_deref().unwrap_or("N/A")),
+        format!("Industry: {}", lead.industry.as_deref().unwrap_or("N/A")),
+        format!(
+            "Sub-Industry: {}",
+            lead.sub_industry.as_deref().unwrap_or("N/A")
+        ),
+        format!(
+            "Employees: {}",
+            lead.employees
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "N/A".to_string())
+        ),
+        format!(
+            "Employee Range: {}",
+            lead.employee_range.as_deref().unwrap_or("N/A")
+        ),
+        format!(
+            "Revenue: {}",
+            lead.revenue
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "N/A".to_string())
+        ),
+        format!(
+            "Revenue Range: {}",
+            lead.revenue_range.as_deref().unwrap_or("N/A")
+        ),
+        format!(
+            "LinkedIn: {}",
+            lead.company_linkedin_url.as_deref().unwrap_or("N/A")
+        ),
+        format!("City: {}", lead.city.as_deref().unwrap_or("N/A")),
+        format!("State: {}", lead.state.as_deref().unwrap_or("N/A")),
+        format!("Country: {}", lead.country.as_deref().unwrap_or("N/A")),
+    ];
+
+    // Add company profile if available
+    if let Some(profile) = &lead.company_profile {
+        parts.push(format!("\nCompany Research Profile:\n{}", profile));
+    }
+
+    // Add people
+    if !people.is_empty() {
+        parts.push(format!("\nKey People ({}):", people.len()));
+        for person in people {
+            let name = format!("{} {}", person.first_name, person.last_name);
+            let title = person.title.as_deref().unwrap_or("Unknown title");
+            let email = person.email.as_deref().unwrap_or("No email");
+            let linkedin = person.linkedin_url.as_deref().unwrap_or("No LinkedIn");
+            parts.push(format!("  - {}, {} ({}, {})", name, title, email, linkedin));
+            if let Some(profile) = &person.person_profile {
+                let truncated = if profile.len() > 200 {
+                    format!("{}...", &profile[..200])
+                } else {
+                    profile.clone()
+                };
+                parts.push(format!("    Profile: {}", truncated));
+            }
+        }
+    }
+
+    parts.join("\n")
+}

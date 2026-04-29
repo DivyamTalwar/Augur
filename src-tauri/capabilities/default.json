@@ -6,19 +6,6 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
-    "shell:allow-spawn",
-    "shell:allow-execute",
-    "shell:allow-kill",
-    "shell:allow-open",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "claude",
-          "cmd": "claude",
-          "args": true
-        }
-      ]
-    }
+    "shell:allow-open"
   ]
 }

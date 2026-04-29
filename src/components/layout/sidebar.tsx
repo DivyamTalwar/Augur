@@ -139,7 +139,7 @@ export function Sidebar() {
 
   return (
     <aside
-      className="relative w-[260px] flex flex-col p-4 overflow-hidden border-r border-line"
+      className="relative flex max-h-[42vh] w-full flex-col overflow-hidden border-b border-line p-3 md:max-h-none md:w-[260px] md:border-b-0 md:border-r md:p-4"
       style={{
         background:
           "linear-gradient(180deg, rgba(251,247,242,0.85) 0%, rgba(246,239,226,0.85) 100%)",

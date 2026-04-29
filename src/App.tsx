@@ -46,7 +46,7 @@ function AppContent() {
     <>
       <AppBackground />
       <CompanyOverviewDialog hasCompanyOverview={onboardingStatus?.hasCompanyOverview ?? false} />
-      <div className="relative z-[2] flex h-screen font-sans antialiased">
+      <div className="relative z-[2] flex h-screen flex-col font-sans antialiased md:flex-row">
         <Sidebar />
         <MainShell>
           <Suspense

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useParams, Navigate } from "react-router-dom";
 import {
   IconBuilding,
@@ -24,6 +24,7 @@ import {
 } from "@/components/layout/entity-detail-layout";
 import { useLeadDetail } from "@/lib/hooks/use-leads";
 import { useSettingsStore } from "@/lib/store/settings-store";
+import { useResearchDepthOverrideStore } from "@/lib/store/research-depth-store";
 import type { ResearchDepth } from "@/lib/tauri/commands";
 
 export default function LeadDetailPage() {
@@ -34,8 +35,9 @@ export default function LeadDetailPage() {
   const defaultResearchDepth = useSettingsStore((state) => state.defaultResearchDepth);
   const orchestrationEnabled = useSettingsStore((state) => state.orchestrationEnabled);
   const loadSettings = useSettingsStore((state) => state.loadSettings);
-  const [depthOverrides, setDepthOverrides] = useState<Record<number, ResearchDepth>>({});
-  const researchDepth = depthOverrides[leadId] ?? defaultResearchDepth;
+  const getDepthForLead = useResearchDepthOverrideStore((state) => state.getDepthForLead);
+  const setDepthForLead = useResearchDepthOverrideStore((state) => state.setDepthForLead);
+  const researchDepth = getDepthForLead(leadId, defaultResearchDepth as ResearchDepth);
 
   useEffect(() => {
     loadSettings();
@@ -202,9 +204,9 @@ export default function LeadDetailPage() {
           <ResearchDepthDial
             value={researchDepth}
             onChange={(depth) => {
-              setDepthOverrides((current) => ({ ...current, [leadId]: depth }));
+              setDepthForLead(leadId, depth);
             }}
-            specialistsEnabled={orchestrationEnabled && researchDepth !== "light"}
+            orchestrationEnabled={orchestrationEnabled}
           />
           <LeadResearchPanel
             lead={lead}

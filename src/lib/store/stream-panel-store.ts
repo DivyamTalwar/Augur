@@ -47,7 +47,12 @@ export const useStreamPanelStore = create<StreamPanelState>()(
         set((state) => {
           const newJobLogs = new Map(state.jobLogs);
           const existing = newJobLogs.get(jobId) ?? [];
-          newJobLogs.set(jobId, [...existing, ...logs]);
+          const seen = new Set(existing.map((log) => log.id));
+          const fresh = logs.filter((log) => !seen.has(log.id));
+          if (fresh.length === 0) {
+            return state;
+          }
+          newJobLogs.set(jobId, [...existing, ...fresh]);
           return { jobLogs: newJobLogs };
         }),
 

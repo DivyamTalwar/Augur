@@ -2,7 +2,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { useStreamPanelStore } from "@/lib/store/stream-panel-store";
 import { queryClient } from "@/lib/query/query-client";
 import { queryKeys } from "@/lib/query/keys";
-import { getJobLogs, getJobsActive } from "./commands";
+import { getJobLogs, getJobsActive, isTauriRuntime } from "./commands";
 import { parseJobLogs } from "@/lib/stream/job-log-parser";
 
 // Event payload types from backend
@@ -52,6 +52,12 @@ interface JobCreatedPayload {
   entityLabel: string;
 }
 
+interface JobLogsAppendedPayload {
+  jobId: string;
+  count: number;
+  lastSequence: number;
+}
+
 let unlisteners: UnlistenFn[] = [];
 let isInitialized = false;
 
@@ -61,6 +67,10 @@ let isInitialized = false;
  * Should be called once at app startup.
  */
 export async function initializeEventBridge(): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+
   // Prevent double initialization
   if (isInitialized) {
     return;
@@ -143,20 +153,34 @@ export async function initializeEventBridge(): Promise<void> {
   });
   unlisteners.push(personDeletedUnlisten);
 
-  // Job created → set active tab, open panel, invalidate jobs query
+  // Job created → set active tab without overriding an explicit collapsed dock.
   const jobCreatedUnlisten = await listen<JobCreatedPayload>("job-created", (event) => {
     const { jobId } = event.payload;
 
     const store = useStreamPanelStore.getState();
 
-    // Set this job as active and open the panel
     store.setActiveTab(jobId);
-    store.setOpen(true);
 
     // Invalidate jobs query so the new job appears in the tab list
     queryClient.invalidateQueries({ queryKey: queryKeys.jobsRecent(50) });
   });
   unlisteners.push(jobCreatedUnlisten);
+
+  const jobLogsAppendedUnlisten = await listen<JobLogsAppendedPayload>("job-logs-appended", async (event) => {
+    const { jobId, count, lastSequence } = event.payload;
+    const afterSequence = Math.max(-1, lastSequence - count);
+
+    try {
+      const logs = await getJobLogs(jobId, afterSequence, count);
+      const parsed = parseJobLogs(logs);
+      if (parsed.length > 0) {
+        useStreamPanelStore.getState().appendLogs(jobId, parsed);
+      }
+    } catch (e) {
+      console.error("[event-bridge] Failed to append logs for job:", jobId, e);
+    }
+  });
+  unlisteners.push(jobLogsAppendedUnlisten);
 
   // Job status changed → invalidate jobs queries
   const jobStatusChangedUnlisten = await listen<JobStatusChangedPayload>("job-status-changed", (event) => {

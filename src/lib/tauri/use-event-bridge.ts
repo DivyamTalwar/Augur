@@ -10,10 +10,12 @@ import { initializeEventBridge, cleanupEventBridge } from "./event-bridge";
  */
 export function useEventBridge() {
   useEffect(() => {
-    initializeEventBridge();
+    void initializeEventBridge().catch((error) => {
+      console.error("[event-bridge] Failed to initialize:", error);
+    });
 
     return () => {
-      cleanupEventBridge();
+      void cleanupEventBridge();
     };
   }, []);
 }

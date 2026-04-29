@@ -195,6 +195,7 @@ pub fn get_active_scoring_config(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn save_scoring_config(
     state: State<'_, DbState>,
     name: String,
@@ -245,6 +246,7 @@ pub fn get_unscored_leads(state: State<'_, DbState>) -> Result<Vec<Lead>, String
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn save_lead_score(
     state: State<'_, DbState>,
     lead_id: i64,

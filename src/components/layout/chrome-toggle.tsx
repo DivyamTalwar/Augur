@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useSettingsStore } from "@/lib/store/settings-store";
+import { SwitchPill } from "@/components/ui/switch-pill";
 import { cn } from "@/lib/utils";
 
 const ChromeIcon = (
@@ -39,21 +40,7 @@ export function ChromeToggle() {
     >
       <span className="shrink-0">{ChromeIcon}</span>
       <span className="flex-1 text-left truncate">Chrome Access</span>
-      <span
-        aria-hidden
-        className="relative inline-block w-8 h-[18px] rounded-full transition-colors duration-200"
-        style={{
-          background: useChrome ? "var(--color-flame)" : "var(--color-line-2)",
-        }}
-      >
-        <span
-          className="absolute top-[2px] w-[14px] h-[14px] rounded-full bg-paper transition-transform duration-200"
-          style={{
-            transform: useChrome ? "translateX(16px)" : "translateX(2px)",
-            boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-          }}
-        />
-      </span>
+      <SwitchPill active={useChrome} />
     </button>
   );
 }

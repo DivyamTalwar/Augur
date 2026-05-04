@@ -1,4 +1,5 @@
 import { useLocation } from "react-router-dom";
+import { AugurMark } from "@/components/brand/augur-mark";
 
 const SearchIcon = (
   <svg width={15} height={15} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.7}>
@@ -70,16 +71,21 @@ export function TopBar() {
         WebkitBackdropFilter: "blur(8px)",
       }}
     >
-      <div className="flex items-center gap-2 text-[13px] text-ink-2">
+      <div className="flex items-center gap-2.5 text-[13px] text-ink-2">
         <div
-          className="grid place-items-center w-[22px] h-[22px] rounded-md text-white font-bold text-[11px]"
+          className="grid h-[28px] w-[28px] place-items-center overflow-hidden rounded-[8px]"
           style={{
-            background: "linear-gradient(135deg, var(--color-flame), var(--color-flame-2))",
-            boxShadow: "0 2px 6px rgba(255,91,31,0.35)",
+            background:
+              "radial-gradient(circle at 50% 88%, rgba(255,91,31,0.36), transparent 44%), linear-gradient(180deg, #1A1714, #0F0C0A)",
+            boxShadow: "0 0 0 1px rgba(255,91,31,0.24), 0 4px 12px -7px rgba(255,91,31,0.9)",
           }}
         >
-          Q
+          <AugurMark className="h-[22px] w-[22px]" decorative />
         </div>
+        <span className="font-serif text-[15px] tracking-[-0.01em] text-ink">
+          Augur <em className="italic text-flame">OS</em>
+        </span>
+        <span className="text-line-2">/</span>
         <span className="text-ink-3">{root}</span>
         <span className="text-line-2">/</span>
         <span className="text-ink font-semibold">{leaf}</span>

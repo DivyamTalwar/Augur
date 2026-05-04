@@ -9,6 +9,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { useEventBridge } from "@/lib/tauri/use-event-bridge";
 import { queryClient } from "@/lib/query/query-client";
 import { CompanyOverviewDialog } from "@/components/onboarding/company-overview-dialog";
+import { CommandPalette } from "@/components/command-palette";
 import { useOnboardingStatus } from "@/lib/query";
 
 const LeadListPage = lazy(() => import("@/pages/lead/list"));
@@ -46,6 +47,7 @@ function AppContent() {
     <>
       <AppBackground />
       <CompanyOverviewDialog hasCompanyOverview={onboardingStatus?.hasCompanyOverview ?? false} />
+      <CommandPalette />
       <div className="relative z-[2] flex h-screen flex-col font-sans antialiased md:flex-row">
         <Sidebar />
         <MainShell>

@@ -2,8 +2,7 @@ import { useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { ChromeToggle } from "./chrome-toggle";
 import { OrchestrationControls } from "./orchestration-controls";
-import { OnboardingChecklist } from "@/components/onboarding/onboarding-checklist";
-import { useOnboardingStatus } from "@/lib/query";
+import { AugurMark } from "@/components/brand/augur-mark";
 import { useSettingsStore } from "@/lib/store/settings-store";
 import { cn } from "@/lib/utils";
 
@@ -53,6 +52,7 @@ function NavRow({ to, label, icon, badge }: NavItem) {
   return (
     <NavLink
       to={to}
+      viewTransition
       className={({ isActive }) =>
         cn(
           "relative flex items-center gap-2.5 px-2.5 py-2 rounded-[10px] text-[13px] font-medium",
@@ -130,7 +130,6 @@ function SectionLabel({ num, children }: { num: string; children: React.ReactNod
 }
 
 export function Sidebar() {
-  const { data: onboardingStatus } = useOnboardingStatus();
   const loadSettings = useSettingsStore((state) => state.loadSettings);
 
   useEffect(() => {
@@ -139,7 +138,7 @@ export function Sidebar() {
 
   return (
     <aside
-      className="relative flex max-h-[42vh] w-full flex-col overflow-hidden border-b border-line p-3 md:max-h-none md:w-[260px] md:border-b-0 md:border-r md:p-4"
+      className="relative flex max-h-[42vh] w-full flex-col overflow-x-hidden overflow-y-auto border-b border-line p-3 md:max-h-none md:w-[260px] md:border-b-0 md:border-r md:p-4"
       style={{
         background:
           "linear-gradient(180deg, rgba(251,247,242,0.85) 0%, rgba(246,239,226,0.85) 100%)",
@@ -160,23 +159,26 @@ export function Sidebar() {
       />
 
       {/* Brand */}
-      <div className="flex items-center gap-2.5 px-2 pt-1.5 pb-[18px]">
+      <div className="flex items-center gap-3 px-2 pt-1.5 pb-[18px]">
         <div
-          className="relative grid place-items-center w-[34px] h-[34px] rounded-[10px] text-[#FBF7F2] font-extrabold text-[16px]"
+          className="relative grid h-[42px] w-[42px] place-items-center overflow-hidden rounded-[12px]"
           style={{
-            letterSpacing: "-0.02em",
             boxShadow:
-              "0 1px 0 rgba(255,255,255,0.5) inset, 0 4px 12px rgba(26,23,20,0.25)",
+              "0 1px 0 rgba(255,255,255,0.28) inset, 0 12px 28px -16px rgba(255,91,31,0.9), 0 8px 18px -12px rgba(26,23,20,0.65)",
             background:
-              "linear-gradient(#1A1714, #2A241D) padding-box, conic-gradient(from var(--ang2,0deg), var(--color-flame), var(--color-flame-2), var(--color-leaf), var(--color-flame)) border-box",
-            border: "2px solid transparent",
-            animation: "brand-spin 8s linear infinite",
+              "radial-gradient(circle at 50% 88%, rgba(255,91,31,0.34), transparent 42%), linear-gradient(180deg, #1A1714, #0F0C0A 54%, #1A1714)",
+            border: "1px solid rgba(255,91,31,0.28)",
           }}
         >
-          <span className="relative z-[1]">A</span>
+          <AugurMark className="relative z-[1] h-[36px] w-[36px]" glow decorative />
         </div>
-        <div className="font-serif text-[22px] tracking-[-0.01em] text-ink leading-none">
-          Augur <em className="italic text-flame">OS</em>
+        <div className="leading-none">
+          <div className="font-serif text-[23px] tracking-[-0.01em] text-ink">
+            Augur <em className="italic text-flame">OS</em>
+          </div>
+          <div className="mt-1 font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-ink-3">
+            Signal Engine
+          </div>
         </div>
         <div className="ml-auto font-mono uppercase text-[10px] font-semibold tracking-[0.06em] text-ink-2 bg-paper border border-line px-[7px] py-[3px] rounded-full">
           v3
@@ -206,7 +208,7 @@ export function Sidebar() {
           <div className="space-y-1">
             <div className="relative flex items-center gap-2.5 px-2.5 py-2 rounded-[10px] text-[13px] font-medium text-ink-2">
               <span className="shrink-0">{ModelIcon}</span>
-              <span className="flex-1 truncate">Opus 4.6</span>
+              <span className="flex-1 truncate">Opus 4.7</span>
               <span
                 className="font-mono text-[10px] px-1.5 py-0.5 rounded-md font-semibold"
                 style={{
@@ -224,8 +226,6 @@ export function Sidebar() {
       </div>
 
       <div className="flex-1" />
-
-      {onboardingStatus && <OnboardingChecklist status={onboardingStatus} />}
     </aside>
   );
 }

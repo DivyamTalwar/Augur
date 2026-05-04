@@ -1,7 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { motion, AnimatePresence, m } from "motion/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStreamPanelStore } from "@/lib/store/stream-panel-store";
@@ -12,8 +19,24 @@ import { useStreamSubscription } from "@/components/stream-panel/use-stream-subs
 import { ClientLogEntry, LogEntryType } from "@/lib/types/claude";
 import { cn } from "@/lib/utils";
 import { CostPill } from "./cost-pill";
+import { ArrowDownIcon, Icon } from "@/components/ui/icon";
 
 const EMPTY_LOGS: ClientLogEntry[] = [];
+
+const DOCK_HEIGHT_KEY = "agent-dock-height";
+const DOCK_DEFAULT_HEIGHT = 320;
+const DOCK_MIN_HEIGHT = 140;
+const DOCK_COLLAPSED_HEIGHT = 48;
+const SCROLL_STICK_THRESHOLD_PX = 48;
+
+function readSavedHeight(): number {
+  if (typeof window === "undefined") return DOCK_DEFAULT_HEIGHT;
+  const raw = window.localStorage.getItem(DOCK_HEIGHT_KEY);
+  if (!raw) return DOCK_DEFAULT_HEIGHT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DOCK_DEFAULT_HEIGHT;
+  return Math.max(DOCK_MIN_HEIGHT, parsed);
+}
 
 /**
  * AgentDock — collapsible bottom panel matching augur-os.html `.agent-dock`.
@@ -42,9 +65,67 @@ export function AgentDock() {
   // Don't render until there's at least one job
   const hasJobs = tabs.length > 0;
   const collapsed = !isOpen || !hasJobs;
-  const expandedHeight = 260;
-  const collapsedHeight = 48;
-  const height = collapsed ? collapsedHeight : expandedHeight;
+
+  // User-resizable dock height with localStorage persist + active-drag tracking.
+  const [dockHeight, setDockHeight] = useState<number>(readSavedHeight);
+  const [isResizing, setIsResizing] = useState(false);
+  const dragStateRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  const startResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (collapsed) return;
+      event.preventDefault();
+      dragStateRef.current = { startY: event.clientY, startHeight: dockHeight };
+      setIsResizing(true);
+
+      const onMove = (moveEvent: PointerEvent) => {
+        const start = dragStateRef.current;
+        if (!start) return;
+        const delta = start.startY - moveEvent.clientY; // upward drag → positive delta
+        const maxHeight = Math.max(
+          DOCK_MIN_HEIGHT + 50,
+          window.innerHeight - 120
+        );
+        const next = Math.max(
+          DOCK_MIN_HEIGHT,
+          Math.min(maxHeight, start.startHeight + delta)
+        );
+        setDockHeight(next);
+      };
+
+      const onUp = () => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        dragStateRef.current = null;
+        setIsResizing(false);
+        try {
+          window.localStorage.setItem(DOCK_HEIGHT_KEY, String(Math.round(dockHeight)));
+        } catch {
+          // localStorage may be disabled — ignore
+        }
+      };
+
+      document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+    },
+    [collapsed, dockHeight]
+  );
+
+  // Persist final height when drag ends (also on dependency change).
+  useEffect(() => {
+    if (isResizing) return;
+    try {
+      window.localStorage.setItem(DOCK_HEIGHT_KEY, String(Math.round(dockHeight)));
+    } catch {
+      // ignore
+    }
+  }, [dockHeight, isResizing]);
+
+  const height = collapsed ? DOCK_COLLAPSED_HEIGHT : dockHeight;
 
   const runningCount = useMemo(
     () => tabs.filter((t) => t.status === "running" || t.status === "queued").length,
@@ -63,7 +144,11 @@ export function AgentDock() {
     <motion.section
       initial={false}
       animate={{ height: hasJobs ? height : 0 }}
-      transition={{ duration: 0.45, ease: [0.7, 0, 0.2, 1] }}
+      transition={
+        isResizing
+          ? { duration: 0 }
+          : { duration: 0.45, ease: [0.7, 0, 0.2, 1] }
+      }
       className="relative flex-shrink-0 overflow-hidden border-t border-line"
       style={{
         background:
@@ -72,17 +157,43 @@ export function AgentDock() {
         WebkitBackdropFilter: "blur(20px) saturate(140%)",
       }}
     >
-      {/* Shimmering top border */}
-      <span
-        aria-hidden
-        className="absolute top-0 left-0 right-0 h-[1px] pointer-events-none"
-        style={{
-          background:
-            "linear-gradient(90deg, transparent, var(--color-flame), var(--color-flame-2), var(--color-leaf), transparent)",
-          backgroundSize: "200% 100%",
-          animation: "shimmer 6s linear infinite",
-        }}
-      />
+      {/* Drag-to-resize handle — VS Code style, drag from the top edge upward to grow. */}
+      {!collapsed && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize agent dock"
+          onPointerDown={startResize}
+          className={cn(
+            "group/dockhandle absolute top-0 left-0 right-0 z-[6] h-[6px] cursor-row-resize",
+            "transition-colors duration-150",
+            isResizing ? "bg-flame" : "bg-line hover:bg-flame/40"
+          )}
+        >
+          <div
+            className={cn(
+              "absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[3px] rounded-full transition-all duration-150 shadow-sm",
+              isResizing
+                ? "w-16 bg-flame"
+                : "w-12 bg-line-2 group-hover/dockhandle:w-16 group-hover/dockhandle:bg-flame"
+            )}
+          />
+        </div>
+      )}
+
+      {/* Shimmering top border (suppressed during resize so the grip is the only visual at the edge) */}
+      {!isResizing && (
+        <span
+          aria-hidden
+          className="absolute top-0 left-0 right-0 h-[1px] pointer-events-none"
+          style={{
+            background:
+              "linear-gradient(90deg, transparent, var(--color-flame), var(--color-flame-2), var(--color-leaf), transparent)",
+            backgroundSize: "200% 100%",
+            animation: "shimmer 6s linear infinite",
+          }}
+        />
+      )}
       {/* Inner radial highlights */}
       <span
         aria-hidden
@@ -270,6 +381,49 @@ function useElapsed(startMs: number | undefined) {
 
 function DockBody() {
   const { logs, isRunning, status, isLoading } = useActiveTabLogs();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Refs avoid stale-closure races during fast log streaming. State only mirrors
+  // the "Latest" pill visibility — the auto-scroll lock itself is pure ref.
+  const stickRef = useRef(true);
+  const programmaticRef = useRef(false);
+  const [showLatest, setShowLatest] = useState(false);
+
+  const handleScroll = useCallback(() => {
+    if (programmaticRef.current) {
+      programmaticRef.current = false;
+      return;
+    }
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = distanceFromBottom <= SCROLL_STICK_THRESHOLD_PX;
+    if (stickRef.current !== atBottom) {
+      stickRef.current = atBottom;
+      setShowLatest(!atBottom);
+    }
+  }, []);
+
+  // Layout effect: fires synchronously after DOM mutation, before paint.
+  // Reading stickRef.current at call time means we always have the most-recent
+  // user intent — no stale closure can yank the user back to the bottom.
+  useLayoutEffect(() => {
+    if (!stickRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    programmaticRef.current = true;
+    el.scrollTop = el.scrollHeight;
+  });
+
+  const jumpToLatest = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    programmaticRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    stickRef.current = true;
+    setShowLatest(false);
+  }, []);
 
   if (isLoading && logs.length === 0) {
     return (
@@ -287,34 +441,61 @@ function DockBody() {
   }
 
   return (
-    <div className="flex-1 overflow-auto px-9 pt-1 pb-4 font-mono text-[12px] text-ink-2">
-      <AnimatePresence initial={false}>
-        {logs.map((log, idx) => (
-          <motion.div
-            key={log.id}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{
-              duration: 0.4,
-              ease: "easeOut",
-              delay: Math.min(idx, 5) * 0.05,
-            }}
-            className="grid items-start gap-3 py-2 border-b border-dashed border-line"
-            style={{ gridTemplateColumns: "14px 1fr auto" }}
-          >
-            <LogIconChip type={log.type} />
-            <LogTextLine entry={log} />
-            <span className="text-[10px] text-ink-3 mt-1 tabular-nums">{formatTime(log.timestamp)}</span>
-          </motion.div>
-        ))}
-      </AnimatePresence>
-      {isRunning && (
-        <div className="flex items-center gap-2 py-3 text-ink-3">
-          <BouncingDots />
-          <span>processing…</span>
-        </div>
+    <div className="relative flex-1 min-h-0">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="absolute inset-0 overflow-y-auto overflow-x-hidden px-9 pt-1 pb-4 font-mono text-[12px] text-ink-2"
+      >
+        <AnimatePresence initial={false}>
+          {logs.map((log, idx) => (
+            <motion.div
+              key={log.id}
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{
+                duration: 0.4,
+                ease: "easeOut",
+                delay: Math.min(idx, 5) * 0.05,
+              }}
+              className="grid items-start gap-3 py-2 border-b border-dashed border-line"
+              style={{ gridTemplateColumns: "14px 1fr auto" }}
+            >
+              <LogIconChip type={log.type} />
+              <LogTextLine entry={log} />
+              <span className="text-[10px] text-ink-3 mt-1 tabular-nums">{formatTime(log.timestamp)}</span>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+        {isRunning && (
+          <div className="flex items-center gap-2 py-3 text-ink-3">
+            <BouncingDots />
+            <span>processing…</span>
+          </div>
+        )}
+      </div>
+
+      {showLatest && logs.length > 0 && (
+        <m.button
+          type="button"
+          onClick={jumpToLatest}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 6 }}
+          transition={{ type: "spring", stiffness: 280, damping: 24 }}
+          className="absolute bottom-3 left-1/2 -translate-x-1/2 z-[2] flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-mono font-semibold text-paper shadow-lg"
+          style={{
+            background:
+              "linear-gradient(180deg, var(--color-flame), var(--color-flame-2))",
+            boxShadow:
+              "0 8px 22px -10px rgba(255,91,31,0.7), 0 1px 0 rgba(255,255,255,0.18) inset",
+          }}
+          aria-label="Jump to latest"
+        >
+          <Icon icon={ArrowDownIcon} size={12} strokeWidth={2} />
+          <span>Latest</span>
+        </m.button>
       )}
-      <div ref={(el) => el?.scrollIntoView()} />
     </div>
   );
 }

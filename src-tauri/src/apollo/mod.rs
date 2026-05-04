@@ -11,8 +11,7 @@ const CACHE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 const MAX_ATTEMPTS: usize = 3;
 const APOLLO_MATCH_COST_CENTS: i64 = 1;
-const KEYRING_SERVICE: &str = "augur-os";
-const KEYRING_USER: &str = "apollo_api_key";
+const KEY_FILE_NAME: &str = "apollo.key";
 const USAGE_PENDING: &str = "pending";
 const USAGE_COMPLETED: &str = "completed";
 const USAGE_FAILED: &str = "failed";
@@ -25,46 +24,73 @@ const PENDING_RECOVERY_AGE_MS: i64 = 60 * 60 * 1000;
 pub struct ApolloKeyStatus {
     pub configured: bool,
     pub source: String,
+    pub last4: Option<String>,
+    pub key_length: Option<usize>,
+}
+
+fn last4_of(key: &str) -> Option<String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let tail: String = chars.iter().rev().take(4).collect::<String>().chars().rev().collect();
+    Some(tail)
 }
 
 pub fn get_key_status() -> ApolloKeyStatus {
-    if std::env::var("APOLLO_API_KEY")
+    if let Some(env_key) = std::env::var("APOLLO_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
-        .is_some()
     {
+        let last4 = last4_of(&env_key);
+        let key_length = Some(env_key.trim().chars().count());
         return ApolloKeyStatus {
             configured: true,
             source: "env".to_string(),
+            last4,
+            key_length,
         };
     }
 
-    if load_key_from_keyring().is_some() {
+    if let Some(stored) = load_key_from_file() {
+        let last4 = last4_of(&stored);
+        let key_length = Some(stored.trim().chars().count());
         return ApolloKeyStatus {
             configured: true,
-            source: "keychain".to_string(),
+            source: "local".to_string(),
+            last4,
+            key_length,
         };
     }
 
     ApolloKeyStatus {
         configured: false,
         source: "none".to_string(),
+        last4: None,
+        key_length: None,
     }
 }
 
 pub fn set_api_key(api_key: &str) -> Result<(), String> {
-    if api_key.trim().is_empty() {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
         return Err("Apollo API key cannot be empty".to_string());
     }
-    keyring_entry()?
-        .set_password(api_key.trim())
-        .map_err(|e| e.to_string())
+    let path = key_file_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, trimmed.as_bytes()).map_err(|e| e.to_string())?;
+    restrict_file_permissions(&path);
+    Ok(())
 }
 
 pub fn clear_api_key() -> Result<(), String> {
-    match keyring_entry()?.delete_credential() {
+    let path = key_file_path()?;
+    match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -255,16 +281,35 @@ fn load_api_key() -> Option<String> {
     std::env::var("APOLLO_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
-        .or_else(load_key_from_keyring)
+        .or_else(load_key_from_file)
 }
 
-fn load_key_from_keyring() -> Option<String> {
-    keyring_entry().ok()?.get_password().ok()
+fn load_key_from_file() -> Option<String> {
+    let path = key_file_path().ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
-fn keyring_entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())
+fn key_file_path() -> Result<std::path::PathBuf, String> {
+    let dir = dirs::data_dir()
+        .ok_or_else(|| "Could not locate application data directory".to_string())?
+        .join("augur-os");
+    Ok(dir.join(KEY_FILE_NAME))
 }
+
+#[cfg(unix)]
+fn restrict_file_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn restrict_file_permissions(_path: &std::path::Path) {}
 
 struct ApolloRequest {
     index: usize,

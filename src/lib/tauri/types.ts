@@ -58,6 +58,17 @@ export interface Person {
   createdAt: number;
 }
 
+export interface ApolloPersonEnrichment {
+  personId: number;
+  email: string | null;
+  emailStatus: string | null;
+  phone: string | null;
+  apolloPersonId: string | null;
+  linkedinUrl: string | null;
+  matched: boolean;
+  message: string | null;
+}
+
 export interface PersonWithCompany extends Person {
   companyName: string | null;
   companyWebsite: string | null;

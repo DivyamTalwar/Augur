@@ -1,5 +1,5 @@
 use crate::db::{self, DbState, Settings};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, DbState>) -> Result<Settings, String> {
@@ -65,4 +65,14 @@ pub fn set_apollo_api_key(api_key: String) -> Result<(), String> {
 #[tauri::command]
 pub fn clear_apollo_api_key() -> Result<(), String> {
     crate::apollo::clear_api_key()
+}
+
+#[tauri::command]
+pub async fn enrich_person_apollo(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    person_id: i64,
+) -> Result<crate::apollo::ApolloPersonEnrichment, String> {
+    let db_conn = state.conn.clone();
+    crate::apollo::enrich_person_by_id(db_conn, app, person_id).await
 }

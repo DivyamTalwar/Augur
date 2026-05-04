@@ -147,6 +147,7 @@ pub fn run() {
             commands::get_apollo_key_status,
             commands::set_apollo_api_key,
             commands::clear_apollo_api_key,
+            commands::enrich_person_apollo,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

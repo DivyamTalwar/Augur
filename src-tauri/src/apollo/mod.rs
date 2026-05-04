@@ -5,6 +5,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, RETRY_AFTER}
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tauri::AppHandle;
 
 const APOLLO_BASE_URL: &str = "https://api.apollo.io/api/v1";
 const CACHE_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -209,7 +210,7 @@ pub async fn enrich_people_json(
 
     let requested_count = requests.len() as i64;
     let usage_id = match settings.daily_budget_usd_cents {
-        Some(limit_cents) => {
+        Some(limit_cents) if limit_cents > 0 => {
             match reserve_budget(&db_conn, job_id, lead_id, requested_count, limit_cents, now) {
                 Ok(BudgetReservation::Reserved(id)) => Some(id),
                 Ok(BudgetReservation::Denied) => return enriched,
@@ -219,7 +220,7 @@ pub async fn enrich_people_json(
                 }
             }
         }
-        None => None,
+        _ => None,
     };
 
     match bulk_match(
@@ -326,8 +327,14 @@ async fn bulk_match(api_key: &str, details: Vec<Value>) -> Result<Value, String>
         HeaderValue::from_str(api_key).map_err(|e| e.to_string())?,
     );
 
+    // Apollo sits behind Cloudflare and rejects the default reqwest UA with
+    // a 1010 "browser signature" 403. A browser-shaped UA passes the WAF.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 \
+             (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        )
         .build()
         .map_err(|e| e.to_string())?;
     let url = format!("{}/people/bulk_match", APOLLO_BASE_URL);
@@ -424,26 +431,52 @@ fn detail_for_person(person: &Value, domain: Option<&str>, company_name: &str) -
 }
 
 fn extract_apollo_people(response: &Value) -> Vec<Value> {
+    // Apollo's bulk_match returns `matches: [<person>|null, ...]` — each entry is
+    // the person object directly (with `email`, `id`, `first_name`, etc.). Some
+    // alternate shapes wrap it in `{ person: {...} }` or `{ contact: {...} }`,
+    // so accept either form. Null entries mean "no match for that detail".
+    let unwrap_entry = |item: &Value| -> Option<Value> {
+        if item.is_null() {
+            return None;
+        }
+        if let Some(p) = item.get("person").filter(|v| !v.is_null()) {
+            return Some(p.clone());
+        }
+        if let Some(p) = item.get("contact").filter(|v| !v.is_null()) {
+            return Some(p.clone());
+        }
+        if item.is_object() {
+            return Some(item.clone());
+        }
+        None
+    };
+
+    if let Some(items) = response.get("matches").and_then(Value::as_array) {
+        let extracted: Vec<Value> = items.iter().filter_map(unwrap_entry).collect();
+        if !extracted.is_empty() {
+            return extracted;
+        }
+    }
     if let Some(items) = response.get("people").and_then(Value::as_array) {
         return items.clone();
     }
     if let Some(items) = response.get("persons").and_then(Value::as_array) {
         return items.clone();
     }
-    if let Some(items) = response.get("matches").and_then(Value::as_array) {
-        return items
-            .iter()
-            .filter_map(|item| item.get("person").or_else(|| item.get("contact")).cloned())
-            .collect();
-    }
     if let Some(items) = response.get("details").and_then(Value::as_array) {
-        return items
-            .iter()
-            .filter_map(|item| item.get("person").or_else(|| item.get("contact")).cloned())
-            .collect();
+        return items.iter().filter_map(unwrap_entry).collect();
     }
     if let Some(person) = response.get("person") {
         return vec![person.clone()];
+    }
+
+    // Nothing recognized — log the top-level keys so the next debug session is fast.
+    if let Some(obj) = response.as_object() {
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        eprintln!(
+            "[apollo] extract_apollo_people found no matches; response keys: {:?}",
+            keys
+        );
     }
     Vec::new()
 }
@@ -830,8 +863,11 @@ fn budget_allows(
     requested_count: i64,
     now: i64,
 ) -> bool {
+    // Treat 0 (and negatives) as "no cap configured" rather than "deny all".
+    // Users who type 0 in the Daily Cap field mean "uncapped"; users who want
+    // Apollo off entirely toggle the Apollo switch off.
     if daily_budget_usd_cents <= 0 {
-        return false;
+        return true;
     }
 
     let day_start = now - (24 * 60 * 60 * 1000);
@@ -865,6 +901,281 @@ fn normalize_domain(website: &str) -> Option<String> {
     } else {
         Some(host.to_lowercase())
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApolloPersonEnrichment {
+    pub person_id: i64,
+    pub email: Option<String>,
+    pub email_status: Option<String>,
+    pub phone: Option<String>,
+    pub apollo_person_id: Option<String>,
+    pub linkedin_url: Option<String>,
+    pub matched: bool,
+    pub message: Option<String>,
+}
+
+pub async fn enrich_person_by_id(
+    db_conn: Arc<Mutex<Connection>>,
+    app: AppHandle,
+    person_id: i64,
+) -> Result<ApolloPersonEnrichment, String> {
+    let (settings, person_row, lead_row) = {
+        let conn = db_conn.lock().map_err(|e| e.to_string())?;
+        let settings = crate::db::get_settings(&conn).map_err(|e| e.to_string())?;
+        if !settings.apollo_enabled {
+            return Err("Apollo enrichment is disabled. Toggle Apollo on in the sidebar.".into());
+        }
+        let person = crate::db::get_person_raw(&conn, person_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Person not found".to_string())?;
+        let lead_id = person
+            .lead_id
+            .ok_or_else(|| "Person has no associated company — cannot enrich".to_string())?;
+        let lead = crate::db::get_lead(&conn, lead_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Company for this person was not found".to_string())?;
+        (settings, person, lead)
+    };
+
+    let api_key = load_api_key()
+        .ok_or_else(|| "Apollo API key is not configured. Add it in the sidebar.".to_string())?;
+
+    let domain = lead_row.website.as_deref().and_then(normalize_domain);
+    let full_name = format!("{} {}", person_row.first_name, person_row.last_name);
+    let details = vec![json!({
+        "first_name": person_row.first_name,
+        "last_name": person_row.last_name,
+        "name": full_name,
+        "organization_name": lead_row.company_name,
+        "domain": domain,
+        "linkedin_url": person_row.linkedin_url,
+    })];
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let manual_job_id = format!("manual-enrich-{}-{}", person_id, now);
+    let lead_id = lead_row.id;
+    let usage_id = match settings.daily_budget_usd_cents {
+        Some(limit_cents) if limit_cents > 0 => match reserve_budget(
+            &db_conn,
+            &manual_job_id,
+            lead_id,
+            1,
+            limit_cents,
+            now,
+        ) {
+            Ok(BudgetReservation::Reserved(id)) => Some(id),
+            Ok(BudgetReservation::Denied) => {
+                return Err("Apollo daily budget cap reached.".into());
+            }
+            Err(e) => return Err(format!("Budget reservation failed: {}", e)),
+        },
+        _ => None,
+    };
+
+    let response = match bulk_match(&api_key, details).await {
+        Ok(v) => v,
+        Err(e) => {
+            finish_or_log_usage(
+                &db_conn,
+                usage_id,
+                &manual_job_id,
+                lead_id,
+                1,
+                0,
+                USAGE_FAILED,
+                Some(&e),
+            );
+            return Err(e);
+        }
+    };
+
+    let apollo_people = extract_apollo_people(&response);
+    if apollo_people.is_empty() {
+        finish_or_log_usage(
+            &db_conn,
+            usage_id,
+            &manual_job_id,
+            lead_id,
+            1,
+            0,
+            USAGE_COMPLETED,
+            Some("No matches"),
+        );
+        return Ok(ApolloPersonEnrichment {
+            person_id,
+            email: None,
+            email_status: None,
+            phone: None,
+            apollo_person_id: None,
+            linkedin_url: None,
+            matched: false,
+            message: Some("Apollo could not match this person.".into()),
+        });
+    }
+
+    let m = &apollo_people[0];
+    let new_email = m
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string);
+    let new_email_status = m
+        .get("email_status")
+        .or_else(|| m.get("emailStatus"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let new_apollo_id = m
+        .get("id")
+        .or_else(|| m.get("person_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let new_linkedin = m
+        .get("linkedin_url")
+        .or_else(|| m.get("linkedinUrl"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let new_phone = extract_phone(m);
+
+    if new_phone.is_none() {
+        // Surface what Apollo actually returned so we can iterate on field names
+        // when phone reveal turns out to be account-gated.
+        let keys: Vec<&str> = m
+            .as_object()
+            .map(|obj| obj.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        let phone_fields: Vec<(&str, &Value)> = m
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .filter(|(k, _)| k.to_ascii_lowercase().contains("phone"))
+                    .map(|(k, v)| (k.as_str(), v))
+                    .collect()
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "[apollo] No phone for person_id={person_id}; matched record keys: {keys:?}; phone-related fields: {phone_fields:?}"
+        );
+    }
+
+    {
+        let conn = db_conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE people SET
+                email = COALESCE(?1, email),
+                email_source = CASE WHEN ?1 IS NOT NULL THEN 'apollo' ELSE email_source END,
+                email_status = COALESCE(?2, email_status),
+                apollo_person_id = COALESCE(?3, apollo_person_id),
+                linkedin_url = COALESCE(linkedin_url, ?4),
+                phone = COALESCE(?5, phone),
+                researched_at = COALESCE(researched_at, ?6)
+             WHERE id = ?7",
+            params![
+                new_email,
+                new_email_status,
+                new_apollo_id,
+                new_linkedin,
+                new_phone,
+                now,
+                person_id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    finish_or_log_usage(
+        &db_conn,
+        usage_id,
+        &manual_job_id,
+        lead_id,
+        1,
+        1,
+        USAGE_COMPLETED,
+        None,
+    );
+
+    crate::events::emit_person_updated(&app, person_id, Some(lead_id));
+
+    Ok(ApolloPersonEnrichment {
+        person_id,
+        email: new_email,
+        email_status: new_email_status,
+        phone: new_phone,
+        apollo_person_id: new_apollo_id,
+        linkedin_url: new_linkedin,
+        matched: true,
+        message: None,
+    })
+}
+
+fn extract_phone(apollo_person: &Value) -> Option<String> {
+    fn pick(value: &Value, field: &str) -> Option<String> {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    // Apollo can put the phone number in many places depending on the plan, the
+    // contact's data quality, and whether reveal_phone_number was set on the
+    // request. Try direct fields on the person, then the phone_numbers array,
+    // then the nested organization (org HQ as a last resort).
+    for field in [
+        "phone",
+        "sanitized_phone",
+        "direct_phone",
+        "mobile_phone",
+        "work_phone",
+        "personal_phone",
+        "primary_phone",
+        "organization_phone",
+    ] {
+        if let Some(v) = pick(apollo_person, field) {
+            return Some(v);
+        }
+    }
+
+    if let Some(arr) = apollo_person
+        .get("phone_numbers")
+        .and_then(Value::as_array)
+    {
+        for entry in arr {
+            for field in ["sanitized_number", "raw_number", "number"] {
+                if let Some(v) = pick(entry, field) {
+                    return Some(v);
+                }
+            }
+            if let Some(s) = entry.as_str() {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    for org_field in ["organization", "current_organization", "employment_history"] {
+        let org = apollo_person.get(org_field);
+        if let Some(org) = org {
+            if let Some(v) = pick(org, "phone").or_else(|| pick(org, "sanitized_phone")) {
+                return Some(v);
+            }
+            if let Some(arr) = org.get("phone_numbers").and_then(Value::as_array) {
+                for entry in arr {
+                    for field in ["sanitized_number", "raw_number", "number"] {
+                        if let Some(v) = pick(entry, field) {
+                            return Some(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

@@ -120,9 +120,21 @@ function truncateContent(content: string, maxLength: number = MAX_TOOL_RESULT_LE
   return content.slice(0, maxLength) + `... [truncated ${content.length - maxLength} chars]`;
 }
 
+// Map raw Claude model IDs → friendly display labels surfaced in the dock.
+function humanizeModelLabel(raw: unknown): string {
+  const id = typeof raw === "string" ? raw : "";
+  if (/opus.*4[.-]?7/i.test(id)) return "Opus 4.7 · xhigh";
+  if (/opus.*4[.-]?6/i.test(id)) return "Opus 4.6 · xhigh";
+  if (/sonnet.*4[.-]?6/i.test(id)) return "Sonnet 4.6";
+  if (/haiku.*4[.-]?5/i.test(id)) return "Haiku 4.5";
+  return id || "Opus";
+}
+
 function parseSystemEvent(event: ClaudeStreamEvent, timestamp: number): LogEntry | null {
+  // Unrecognized system payload — drop silently rather than dumping raw JSON
+  // into the activity log (was leaking { type: "user", role: ... } objects).
   if (event.type !== "system" || !("subtype" in event)) {
-    return { type: "system", content: JSON.stringify(event), timestamp };
+    return null;
   }
 
   const sys = event as unknown as Record<string, unknown>;
@@ -131,7 +143,7 @@ function parseSystemEvent(event: ClaudeStreamEvent, timestamp: number): LogEntry
     case "init":
       return {
         type: "system",
-        content: `Initialized session with model: ${sys.model || "unknown"}`,
+        content: `Session started · ${humanizeModelLabel(sys.model)}`,
         timestamp,
       };
     case "task_progress": {
@@ -279,7 +291,11 @@ function parseResultEvent(event: ClaudeStreamEvent, timestamp: number): LogEntry
     duration_ms?: number;
     num_turns?: number;
     total_cost_usd?: number;
-    permission_denials?: string[];
+    // Claude sends an array of denial objects — { tool_name, tool_input, ... } —
+    // not strings. We coerce to strings before display.
+    permission_denials?: Array<
+      string | { tool_name?: string; tool_use_id?: string; tool_input?: unknown }
+    >;
   };
   const durationSec = resultEvent.duration_ms ? (resultEvent.duration_ms / 1000).toFixed(1) : "?";
 
@@ -312,9 +328,16 @@ function parseResultEvent(event: ClaudeStreamEvent, timestamp: number): LogEntry
   }
 
   if (resultEvent.permission_denials && resultEvent.permission_denials.length > 0) {
+    const tools = resultEvent.permission_denials
+      .map((d) => {
+        if (typeof d === "string") return d;
+        if (d && typeof d === "object" && typeof d.tool_name === "string") return d.tool_name;
+        return "unknown tool";
+      })
+      .filter((s, i, a) => a.indexOf(s) === i); // dedupe
     entries.push({
       type: "error",
-      content: `Permission denied: ${resultEvent.permission_denials.join(", ")}`,
+      content: `Permission denied for ${tools.join(", ")}. Enable --dangerously-skip-permissions or grant in settings.`,
       timestamp,
     });
   }

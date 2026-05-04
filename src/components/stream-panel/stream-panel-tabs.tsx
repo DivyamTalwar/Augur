@@ -1,5 +1,6 @@
 "use client";
 
+import { AnimatePresence, m } from "motion/react";
 import { useStreamPanelStore } from "@/lib/store/stream-panel-store";
 import { useStreamTabs, StreamTab } from "@/lib/hooks/use-stream-tabs";
 import { cn } from "@/lib/utils";
@@ -32,17 +33,28 @@ export function StreamPanelTabs({ onCloseTab }: StreamPanelTabsProps) {
 
   return (
     <div className="flex items-stretch overflow-x-auto h-full">
-      {tabs.map((tab) => (
-        <TabItem
-          key={tab.jobId}
-          tab={tab}
-          isActive={tab.jobId === activeTabId}
-          onClick={() => setActiveTab(tab.jobId)}
-          onClose={() =>
-            onCloseTab(tab.jobId, tab.status === "running" || tab.status === "queued")
-          }
-        />
-      ))}
+      <AnimatePresence initial={false}>
+        {tabs.map((tab) => (
+          <m.div
+            key={tab.jobId}
+            layout
+            initial={{ opacity: 0, maxWidth: 0 }}
+            animate={{ opacity: 1, maxWidth: 240 }}
+            exit={{ opacity: 0, maxWidth: 0 }}
+            transition={{ type: "spring", stiffness: 320, damping: 28 }}
+            className="overflow-hidden"
+          >
+            <TabItem
+              tab={tab}
+              isActive={tab.jobId === activeTabId}
+              onClick={() => setActiveTab(tab.jobId)}
+              onClose={() =>
+                onCloseTab(tab.jobId, tab.status === "running" || tab.status === "queued")
+              }
+            />
+          </m.div>
+        ))}
+      </AnimatePresence>
     </div>
   );
 }
@@ -113,19 +125,39 @@ function StatusIcon({ status }: { status: StreamTab["status"] }) {
 
 function TabItem({ tab, isActive, onClick, onClose }: TabItemProps) {
   const TypeIconObj = getTypeIconObject(tab.type);
+  const isLive = tab.status === "running" || tab.status === "queued";
 
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        "group/tab flex items-center gap-2 px-3 text-[12px] whitespace-nowrap",
+        "group/tab relative flex items-center gap-2 px-3 text-[12px] whitespace-nowrap",
         "border-r border-hairline border-b-2 transition-colors duration-150 ease-out",
         isActive
           ? "bg-surface text-fg-emphasis border-b-accent"
           : "bg-bg text-fg-muted border-b-transparent hover:bg-hover-surface hover:text-fg-emphasis"
       )}
     >
+      <AnimatePresence>
+        {isLive && (
+          <m.span
+            key="live-ribbon"
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-[2px] origin-bottom"
+            style={{
+              background:
+                "linear-gradient(90deg, transparent 0%, var(--color-flame) 28%, var(--color-flame-2) 50%, var(--color-flame) 72%, transparent 100%)",
+              backgroundSize: "200% 100%",
+              animation: "shimmer 1.4s linear infinite",
+            }}
+            initial={{ opacity: 0, scaleY: 0.6 }}
+            animate={{ opacity: 1, scaleY: 1 }}
+            exit={{ opacity: 0, scaleY: 0.4, transition: { duration: 0.45 } }}
+            transition={{ type: "spring", stiffness: 280, damping: 22 }}
+          />
+        )}
+      </AnimatePresence>
       <Icon icon={TypeIconObj} size={13} strokeWidth={1.5} className="shrink-0" />
       <span className="max-w-[140px] truncate">{tab.label}</span>
       <StatusIcon status={tab.status} />

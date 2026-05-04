@@ -545,17 +545,21 @@ fn build_person_research_prompt(
 ) -> String {
     let mut full_prompt = String::new();
 
-    // Add company overview context if available
+    // 1. Our own company's positioning (what WE sell). XML-tagged so Claude
+    //    treats it as data rather than instructions.
     if let Some(overview) = company_overview {
-        full_prompt.push_str(&format!("# Company Overview\n\n{}\n\n---\n\n", overview));
+        full_prompt.push_str(&format!("<WhatWeDo>\n{}\n</WhatWeDo>\n\n", overview));
     }
 
+    // 2. The person research instructions themselves.
     full_prompt.push_str(prompt);
+
+    // 3. Target person + the company they work for, also XML-tagged.
+    full_prompt.push_str("\n\n<TargetPerson>\n");
     full_prompt.push_str(&format!(
-        "\n\n# Person Information\n\nName: {} {}\n",
+        "Name: {} {}\n",
         person.first_name, person.last_name
     ));
-
     if let Some(title) = &person.title {
         full_prompt.push_str(&format!("Title: {}\n", title));
     }
@@ -565,18 +569,37 @@ fn build_person_research_prompt(
     if let Some(linkedin) = &person.linkedin_url {
         full_prompt.push_str(&format!("LinkedIn: {}\n", linkedin));
     }
+    if let Some(level) = &person.management_level {
+        full_prompt.push_str(&format!("Management Level: {}\n", level));
+    }
+    if let Some(year) = person.year_joined {
+        full_prompt.push_str(&format!("Joined Company: {}\n", year));
+    }
+    full_prompt.push_str("</TargetPerson>\n");
 
-    // Add company information if available
+    // 4. Target company — basic facts AND the full research profile if it
+    //    exists. This is the critical context that was missing: without it
+    //    Claude has to invent the company's pain/triggers/buyers from thin air.
     if let Some(l) = lead {
-        full_prompt.push_str(&format!(
-            "\n# Company Information\n\nCompany: {}\n",
-            l.company_name
-        ));
+        full_prompt.push_str("\n<TargetCompany>\n");
+        full_prompt.push_str(&format!("Company: {}\n", l.company_name));
         if let Some(website) = &l.website {
             full_prompt.push_str(&format!("Website: {}\n", website));
         }
+        if let Some(industry) = &l.industry {
+            full_prompt.push_str(&format!("Industry: {}\n", industry));
+        }
+        if let Some(employees) = &l.employee_range {
+            full_prompt.push_str(&format!("Employees: {}\n", employees));
+        }
+        if let Some(profile) = &l.company_profile {
+            full_prompt.push_str("\n--- Company Research Profile ---\n");
+            full_prompt.push_str(profile);
+        }
+        full_prompt.push_str("\n</TargetCompany>\n");
     }
 
+    // 5. Output paths + JSON enrichment schema.
     full_prompt.push_str(&format!(
         "\n# Output Files\n\nWrite the person profile to: {}\n\nAdditionally, write structured enrichment data to: {}\n\n{}\n",
         profile_path.display(),

@@ -71,3 +71,15 @@ Desktop.ini
 *.pem
 *.key
 *.mobileprovision
+
+# Brand source scratchpads (canonical assets live in src-tauri/icons/ and public/logo.svg)
+ChatGPT Image*.png
+*.psd
+*.ai
+*.sketch
+
+# Local agent runtime state (Claude Code sessions, scheduled tasks, caches)
+.claude/
+
+# Local debug and recovery scripts (kept on developer machines, not shipped)
+scripts/

@@ -805,7 +805,8 @@ fn find_existing_person_id(
             title.to_string(),
         ],
     )?;
-    Ok((title_ids.len() == 1).then_some(title_ids[0]))
+    // `.then_some(title_ids[0])` would panic on len 0 (eager arg eval).
+    Ok((title_ids.len() == 1).then(|| title_ids[0]))
 }
 
 fn matching_person_ids(
@@ -841,7 +842,8 @@ where
         .map_err(|e| CompletionError::DatabaseError(e.to_string()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| CompletionError::DatabaseError(e.to_string()))?;
-    Ok((ids.len() == 1).then_some(ids[0]))
+    // `.then_some(ids[0])` would panic on len 0 (eager arg eval), so use `.then(|| ...)`
+    Ok((ids.len() == 1).then(|| ids[0]))
 }
 
 fn optional_str(p: &serde_json::Value, key: &str) -> Option<String> {

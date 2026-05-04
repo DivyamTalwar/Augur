@@ -7,6 +7,7 @@ export type StreamTabType = "company" | "person" | "conversation" | "scoring" | 
 interface StreamPanelState {
   // UI state (persisted to localStorage)
   isOpen: boolean;
+  isMaximized: boolean;
   activeTabId: string | null;
 
   // Logs per job (NOT persisted - hydrated from DB on reload)
@@ -19,6 +20,7 @@ interface StreamPanelState {
   // UI Actions
   setOpen: (open: boolean) => void;
   toggle: () => void;
+  toggleMaximize: () => void;
   setActiveTab: (jobId: string | null) => void;
 
   // Log management
@@ -32,6 +34,7 @@ export const useStreamPanelStore = create<StreamPanelState>()(
   persist(
     (set) => ({
       isOpen: false,
+      isMaximized: false,
       activeTabId: null,
       jobLogs: new Map(),
       isHydrated: false,
@@ -39,6 +42,9 @@ export const useStreamPanelStore = create<StreamPanelState>()(
       setOpen: (open) => set({ isOpen: open }),
 
       toggle: () => set((state) => ({ isOpen: !state.isOpen })),
+
+      toggleMaximize: () =>
+        set((state) => ({ isMaximized: !state.isMaximized, isOpen: true })),
 
       setActiveTab: (jobId) => set({ activeTabId: jobId }),
 
@@ -90,6 +96,7 @@ export const useStreamPanelStore = create<StreamPanelState>()(
       // Only persist UI state, not logs
       partialize: (state) => ({
         isOpen: state.isOpen,
+        isMaximized: state.isMaximized,
         activeTabId: state.activeTabId,
       }),
     }

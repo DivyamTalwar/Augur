@@ -11,12 +11,16 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   StopIconAlias,
+  MaximizeIcon,
+  MinimizeIcon,
 } from "@/components/ui/icon";
 import { Button } from "@/components/ui/button";
 
 export function StreamPanelHeader() {
   const toggle = useStreamPanelStore((s) => s.toggle);
   const isOpen = useStreamPanelStore((s) => s.isOpen);
+  const isMaximized = useStreamPanelStore((s) => s.isMaximized);
+  const toggleMaximize = useStreamPanelStore((s) => s.toggleMaximize);
   const activeTabId = useStreamPanelStore((s) => s.activeTabId);
 
   const { tabs } = useStreamTabs();
@@ -66,8 +70,23 @@ export function StreamPanelHeader() {
 
         <button
           type="button"
+          onClick={toggleMaximize}
+          aria-label={isMaximized ? "Restore stream panel size" : "Maximize stream panel"}
+          title={isMaximized ? "Restore" : "Maximize"}
+          className="p-1 rounded-sm text-fg-muted hover:bg-hover-surface hover:text-fg-emphasis transition-colors duration-150 ease-out"
+        >
+          <Icon
+            icon={isMaximized ? MinimizeIcon : MaximizeIcon}
+            size={13}
+            strokeWidth={1.5}
+          />
+        </button>
+
+        <button
+          type="button"
           onClick={toggle}
           aria-label={isOpen ? "Collapse stream panel" : "Expand stream panel"}
+          title={isOpen ? "Collapse" : "Expand"}
           className="p-1 rounded-sm text-fg-muted hover:bg-hover-surface hover:text-fg-emphasis transition-colors duration-150 ease-out"
         >
           <Icon

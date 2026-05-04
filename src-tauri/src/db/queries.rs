@@ -166,7 +166,7 @@ pub fn delete_leads(conn: &Connection, lead_ids: &[i64]) -> SqliteResult<usize> 
 pub fn get_person(conn: &Connection, id: i64) -> SqliteResult<Option<PersonWithCompany>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.lead_id, p.first_name, p.last_name, p.email,
-                p.email_source, p.email_status, p.apollo_person_id,
+                p.email_source, p.email_status, p.apollo_person_id, p.phone,
                 p.title, p.management_level,
                 p.linkedin_url, p.year_joined, p.person_profile, p.research_status, p.researched_at,
                 p.user_status, p.conversation_topics, p.conversation_generated_at, p.created_at,
@@ -188,24 +188,25 @@ pub fn get_person(conn: &Connection, id: i64) -> SqliteResult<Option<PersonWithC
             email_source: row.get(5)?,
             email_status: row.get(6)?,
             apollo_person_id: row.get(7)?,
-            title: row.get(8)?,
-            management_level: row.get(9)?,
-            linkedin_url: row.get(10)?,
-            year_joined: row.get(11)?,
-            person_profile: row.get(12)?,
+            phone: row.get(8)?,
+            title: row.get(9)?,
+            management_level: row.get(10)?,
+            linkedin_url: row.get(11)?,
+            year_joined: row.get(12)?,
+            person_profile: row.get(13)?,
             research_status: row
-                .get::<_, Option<String>>(13)?
+                .get::<_, Option<String>>(14)?
                 .unwrap_or_else(|| "pending".to_string()),
-            researched_at: row.get(14)?,
+            researched_at: row.get(15)?,
             user_status: row
-                .get::<_, Option<String>>(15)?
+                .get::<_, Option<String>>(16)?
                 .unwrap_or_else(|| "new".to_string()),
-            conversation_topics: row.get(16)?,
-            conversation_generated_at: row.get(17)?,
-            created_at: row.get(18)?,
-            company_name: row.get(19)?,
-            company_website: row.get(20)?,
-            company_industry: row.get(21)?,
+            conversation_topics: row.get(17)?,
+            conversation_generated_at: row.get(18)?,
+            created_at: row.get(19)?,
+            company_name: row.get(20)?,
+            company_website: row.get(21)?,
+            company_industry: row.get(22)?,
         }))
     } else {
         Ok(None)
@@ -215,7 +216,7 @@ pub fn get_person(conn: &Connection, id: i64) -> SqliteResult<Option<PersonWithC
 pub fn get_person_raw(conn: &Connection, id: i64) -> SqliteResult<Option<Person>> {
     let mut stmt = conn.prepare(
         "SELECT id, lead_id, first_name, last_name, email,
-                email_source, email_status, apollo_person_id,
+                email_source, email_status, apollo_person_id, phone,
                 title, management_level,
                 linkedin_url, year_joined, person_profile, research_status, researched_at,
                 user_status, conversation_topics, conversation_generated_at, created_at
@@ -234,21 +235,22 @@ pub fn get_person_raw(conn: &Connection, id: i64) -> SqliteResult<Option<Person>
             email_source: row.get(5)?,
             email_status: row.get(6)?,
             apollo_person_id: row.get(7)?,
-            title: row.get(8)?,
-            management_level: row.get(9)?,
-            linkedin_url: row.get(10)?,
-            year_joined: row.get(11)?,
-            person_profile: row.get(12)?,
+            phone: row.get(8)?,
+            title: row.get(9)?,
+            management_level: row.get(10)?,
+            linkedin_url: row.get(11)?,
+            year_joined: row.get(12)?,
+            person_profile: row.get(13)?,
             research_status: row
-                .get::<_, Option<String>>(13)?
+                .get::<_, Option<String>>(14)?
                 .unwrap_or_else(|| "pending".to_string()),
-            researched_at: row.get(14)?,
+            researched_at: row.get(15)?,
             user_status: row
-                .get::<_, Option<String>>(15)?
+                .get::<_, Option<String>>(16)?
                 .unwrap_or_else(|| "new".to_string()),
-            conversation_topics: row.get(16)?,
-            conversation_generated_at: row.get(17)?,
-            created_at: row.get(18)?,
+            conversation_topics: row.get(17)?,
+            conversation_generated_at: row.get(18)?,
+            created_at: row.get(19)?,
         }))
     } else {
         Ok(None)
@@ -258,7 +260,7 @@ pub fn get_person_raw(conn: &Connection, id: i64) -> SqliteResult<Option<Person>
 pub fn get_people_for_lead(conn: &Connection, lead_id: i64) -> SqliteResult<Vec<Person>> {
     let mut stmt = conn.prepare(
         "SELECT id, lead_id, first_name, last_name, email,
-                email_source, email_status, apollo_person_id,
+                email_source, email_status, apollo_person_id, phone,
                 title, management_level,
                 linkedin_url, year_joined, person_profile, research_status, researched_at,
                 user_status, conversation_topics, conversation_generated_at, created_at
@@ -275,21 +277,22 @@ pub fn get_people_for_lead(conn: &Connection, lead_id: i64) -> SqliteResult<Vec<
             email_source: row.get(5)?,
             email_status: row.get(6)?,
             apollo_person_id: row.get(7)?,
-            title: row.get(8)?,
-            management_level: row.get(9)?,
-            linkedin_url: row.get(10)?,
-            year_joined: row.get(11)?,
-            person_profile: row.get(12)?,
+            phone: row.get(8)?,
+            title: row.get(9)?,
+            management_level: row.get(10)?,
+            linkedin_url: row.get(11)?,
+            year_joined: row.get(12)?,
+            person_profile: row.get(13)?,
             research_status: row
-                .get::<_, Option<String>>(13)?
+                .get::<_, Option<String>>(14)?
                 .unwrap_or_else(|| "pending".to_string()),
-            researched_at: row.get(14)?,
+            researched_at: row.get(15)?,
             user_status: row
-                .get::<_, Option<String>>(15)?
+                .get::<_, Option<String>>(16)?
                 .unwrap_or_else(|| "new".to_string()),
-            conversation_topics: row.get(16)?,
-            conversation_generated_at: row.get(17)?,
-            created_at: row.get(18)?,
+            conversation_topics: row.get(17)?,
+            conversation_generated_at: row.get(18)?,
+            created_at: row.get(19)?,
         })
     })?;
 
@@ -299,7 +302,7 @@ pub fn get_people_for_lead(conn: &Connection, lead_id: i64) -> SqliteResult<Vec<
 pub fn get_all_people(conn: &Connection) -> SqliteResult<Vec<PersonWithCompany>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.lead_id, p.first_name, p.last_name, p.email,
-                p.email_source, p.email_status, p.apollo_person_id,
+                p.email_source, p.email_status, p.apollo_person_id, p.phone,
                 p.title, p.management_level,
                 p.linkedin_url, p.year_joined, p.person_profile, p.research_status, p.researched_at,
                 p.user_status, p.conversation_topics, p.conversation_generated_at, p.created_at,
@@ -319,24 +322,25 @@ pub fn get_all_people(conn: &Connection) -> SqliteResult<Vec<PersonWithCompany>>
             email_source: row.get(5)?,
             email_status: row.get(6)?,
             apollo_person_id: row.get(7)?,
-            title: row.get(8)?,
-            management_level: row.get(9)?,
-            linkedin_url: row.get(10)?,
-            year_joined: row.get(11)?,
-            person_profile: row.get(12)?,
+            phone: row.get(8)?,
+            title: row.get(9)?,
+            management_level: row.get(10)?,
+            linkedin_url: row.get(11)?,
+            year_joined: row.get(12)?,
+            person_profile: row.get(13)?,
             research_status: row
-                .get::<_, Option<String>>(13)?
+                .get::<_, Option<String>>(14)?
                 .unwrap_or_else(|| "pending".to_string()),
-            researched_at: row.get(14)?,
+            researched_at: row.get(15)?,
             user_status: row
-                .get::<_, Option<String>>(15)?
+                .get::<_, Option<String>>(16)?
                 .unwrap_or_else(|| "new".to_string()),
-            conversation_topics: row.get(16)?,
-            conversation_generated_at: row.get(17)?,
-            created_at: row.get(18)?,
-            company_name: row.get(19)?,
-            company_website: row.get(20)?,
-            company_industry: row.get(21)?,
+            conversation_topics: row.get(17)?,
+            conversation_generated_at: row.get(18)?,
+            created_at: row.get(19)?,
+            company_name: row.get(20)?,
+            company_website: row.get(21)?,
+            company_industry: row.get(22)?,
         })
     })?;
 

@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke, Channel } from "@tauri-apps/api/core";
 import type {
+  ApolloPersonEnrichment,
   Lead,
   NewLead,
   Person,
@@ -445,7 +446,7 @@ export type ResearchDepth = "light" | "standard" | "deep";
 
 export interface ApolloKeyStatus {
   configured: boolean;
-  source: "env" | "local" | "keychain" | "none" | string;
+  source: "env" | "keychain" | "none" | string;
   last4: string | null;
   keyLength: number | null;
 }
@@ -479,4 +480,8 @@ export async function setApolloApiKey(apiKey: string): Promise<void> {
 
 export async function clearApolloApiKey(): Promise<void> {
   return invoke("clear_apollo_api_key");
+}
+
+export async function enrichPersonApollo(personId: number): Promise<ApolloPersonEnrichment> {
+  return invoke("enrich_person_apollo", { personId });
 }

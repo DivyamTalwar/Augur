@@ -9,7 +9,7 @@ import {
 // Model is locked to claude-opus-4-6 at xhigh reasoning effort in the Rust
 // job queue. Surface the label here so the sidebar can display it without
 // offering a selector.
-export const LOCKED_MODEL_LABEL = "Opus 4.6 · xhigh";
+export const LOCKED_MODEL_LABEL = "Opus 4.7 · xhigh";
 
 interface SettingsState {
   useChrome: boolean;

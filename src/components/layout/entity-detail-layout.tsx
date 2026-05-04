@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { m } from "motion/react";
 import {
   Icon,
   ArrowLeftIcon,
@@ -8,6 +9,33 @@ import {
   MoreVerticalIconAlias,
 } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
+
+const heroVariants = {
+  hidden: { opacity: 0, y: 6 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    transition: { type: "spring" as const, stiffness: 240, damping: 26 },
+  },
+};
+
+const mainVariants = {
+  hidden: { opacity: 0, y: 8 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    transition: { type: "spring" as const, stiffness: 220, damping: 26, delay: 0.06 },
+  },
+};
+
+const sidebarVariants = {
+  hidden: { opacity: 0, x: 6 },
+  visible: {
+    opacity: 1,
+    x: 0,
+    transition: { type: "spring" as const, stiffness: 220, damping: 26, delay: 0.04 },
+  },
+};
 
 interface EntityDetailLayoutProps {
   backHref: string;
@@ -23,6 +51,8 @@ interface EntityDetailLayoutProps {
   sidebarContent: React.ReactNode;
   /** Color CSS var for the title pin / accent (defaults to flame). */
   accent?: string;
+  /** view-transition-name pinned on the title for shared-element morphs from the list. */
+  titleTransitionName?: string;
 }
 
 export function EntityDetailLayout({
@@ -38,6 +68,7 @@ export function EntityDetailLayout({
   activityContent,
   sidebarContent,
   accent = "var(--color-flame)",
+  titleTransitionName,
 }: EntityDetailLayoutProps) {
   return (
     <>
@@ -47,13 +78,14 @@ export function EntityDetailLayout({
       >
         <Link
           to={backHref}
+          viewTransition
           className="grid place-items-center w-8 h-8 rounded-md text-ink-2 border border-transparent hover:bg-bg-2 hover:border-line hover:text-ink transition-colors"
           aria-label={`Back to ${breadcrumbLabel}`}
         >
           <Icon icon={ArrowLeftIcon} size={15} strokeWidth={1.7} />
         </Link>
         <div className="flex items-center gap-2 text-[13px]">
-          <Link to={backHref} className="text-ink-3 hover:text-ink transition-colors">
+          <Link to={backHref} viewTransition className="text-ink-3 hover:text-ink transition-colors">
             {breadcrumbLabel}
           </Link>
           <span className="text-line-2">/</span>
@@ -67,6 +99,7 @@ export function EntityDetailLayout({
           <div className="flex">
             <Link
               to={prevUrl ?? "#"}
+              viewTransition
               aria-label="Previous"
               className={cn(
                 "grid place-items-center w-7 h-7 rounded-md text-ink-2 hover:bg-bg-2 hover:text-ink transition-colors",
@@ -77,6 +110,7 @@ export function EntityDetailLayout({
             </Link>
             <Link
               to={nextUrl ?? "#"}
+              viewTransition
               aria-label="Next"
               className={cn(
                 "grid place-items-center w-7 h-7 rounded-md text-ink-2 hover:bg-bg-2 hover:text-ink transition-colors",
@@ -106,10 +140,21 @@ export function EntityDetailLayout({
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 overflow-y-auto scroll-stable" style={{ background: "var(--color-paper)" }}>
           <div className="max-w-4xl mx-auto px-9 py-9">
-            <div className="mb-6">
+            <m.div
+              key={`hero-${title}`}
+              className="mb-6"
+              variants={heroVariants}
+              initial="hidden"
+              animate="visible"
+            >
               <h1
                 className="font-serif text-ink mb-1"
-                style={{ fontSize: 38, lineHeight: 1.05, letterSpacing: "-0.02em" }}
+                style={{
+                  fontSize: 38,
+                  lineHeight: 1.05,
+                  letterSpacing: "-0.02em",
+                  ...(titleTransitionName ? { viewTransitionName: titleTransitionName } : {}),
+                }}
               >
                 <span
                   aria-hidden
@@ -121,27 +166,37 @@ export function EntityDetailLayout({
               <div className="text-ink-2 italic" style={{ fontSize: 14 }}>
                 {subtitle}
               </div>
-            </div>
+            </m.div>
 
-            {mainContent}
+            <m.div
+              key={`main-${title}`}
+              variants={mainVariants}
+              initial="hidden"
+              animate="visible"
+            >
+              {mainContent}
 
-            <div className="mt-10 pt-6 border-t border-line">
-              <div className="flex items-center gap-2 mb-4">
-                <h2 className="font-mono-label">Activity</h2>
-                <span aria-hidden className="flex-1 h-[1px] bg-gradient-to-r from-line to-transparent" />
+              <div className="mt-10 pt-6 border-t border-line">
+                <div className="flex items-center gap-2 mb-4">
+                  <h2 className="font-mono-label">Activity</h2>
+                  <span aria-hidden className="flex-1 h-[1px] bg-gradient-to-r from-line to-transparent" />
+                </div>
+                <div className="space-y-3">{activityContent}</div>
               </div>
-              <div className="space-y-3">{activityContent}</div>
-
-            </div>
+            </m.div>
           </div>
         </div>
 
-        <aside
+        <m.aside
+          key={`sidebar-${title}`}
+          variants={sidebarVariants}
+          initial="hidden"
+          animate="visible"
           className="w-72 overflow-y-auto scroll-stable shrink-0 border-l border-line"
           style={{ background: "var(--color-bg)" }}
         >
           <div className="p-5">{sidebarContent}</div>
-        </aside>
+        </m.aside>
       </div>
     </>
   );

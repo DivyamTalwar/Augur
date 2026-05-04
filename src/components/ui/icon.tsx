@@ -41,7 +41,9 @@ import {
   Location01Icon,
   Mail01Icon,
   MagicWand01Icon,
+  Maximize01Icon,
   Message01Icon,
+  Minimize01Icon,
   MinusSignIcon,
   MoreVerticalIcon,
   PauseIcon,
@@ -112,6 +114,8 @@ export const MapPinIcon = Location01Icon;
 export const MessageIcon = Message01Icon;
 export const MessageCircleIcon = BubbleChatIcon;
 export const MinusIcon = MinusSignIcon;
+export const MaximizeIcon = Maximize01Icon;
+export const MinimizeIcon = Minimize01Icon;
 export const MoreVerticalIconAlias = MoreVerticalIcon;
 export const PauseIconAlias = PauseIcon;
 export const PlayIconAlias = PlayIcon;

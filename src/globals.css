@@ -245,6 +245,20 @@
   animation: fade-up 0.35s cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
+/* View Transitions — cream-aware route crossfade */
+@keyframes route-fade-out {
+  to { opacity: 0; transform: translateY(-2px); }
+}
+@keyframes route-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+::view-transition-old(root) {
+  animation: route-fade-out 0.22s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+::view-transition-new(root) {
+  animation: route-fade-in 0.32s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -259,4 +273,35 @@
 /* Toast error fix */
 [data-sonner-toast][data-type="error"] [data-title] {
   color: var(--color-destructive) !important;
+}
+
+/* Branded toast — paper background, brand-tinted left rail per type, edge slide-in */
+[data-sonner-toast] {
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 12px 32px -16px rgba(26, 23, 20, 0.18),
+    0 8px 18px -12px rgba(26, 23, 20, 0.12),
+    0 1px 0 rgba(255, 255, 255, 0.6) inset !important;
+}
+[data-sonner-toast]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--color-line-2);
+  border-radius: 12px 0 0 12px;
+}
+[data-sonner-toast][data-type="success"]::before {
+  background: linear-gradient(180deg, var(--color-leaf), var(--color-leaf-2));
+}
+[data-sonner-toast][data-type="error"]::before {
+  background: var(--color-destructive);
+}
+[data-sonner-toast][data-type="warning"]::before {
+  background: linear-gradient(180deg, var(--color-flame), var(--color-flame-2));
+}
+[data-sonner-toast][data-type="loading"]::before {
+  background: linear-gradient(180deg, var(--color-flame), var(--color-flame-2));
 }

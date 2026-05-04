@@ -1,14 +1,13 @@
 import { useParams, Navigate, Link } from "react-router-dom";
 import {
   IconBuilding,
-  IconBrandLinkedin,
-  IconMail,
   IconCalendar,
   IconBriefcase,
   IconUser,
   IconCircleCheck,
   IconLoader2,
 } from "@/components/ui/icon";
+import { PersonContactPanel } from "@/components/people/person-contact-panel";
 import { PersonProfileTabs } from "@/components/people/person-profile-tabs";
 import { UserStatusSelector } from "@/components/status/user-status-selector";
 import { ResearchStatusBadge } from "@/components/status/research-status-badge";
@@ -145,35 +144,8 @@ export default function PersonDetailPage() {
           )}
         </div>
 
-        {(person.email || person.linkedinUrl) && (
-          <div className="border-t border-line pt-4 mt-4">
-            <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
-              Contact
-            </h4>
-            <div className="space-y-2">
-              {person.email && (
-                <a
-                  href={`mailto:${person.email}`}
-                  className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  <IconMail className="w-4 h-4" />
-                  <span className="truncate">{person.email}</span>
-                </a>
-              )}
-              {person.linkedinUrl && (
-                <a
-                  href={person.linkedinUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  <IconBrandLinkedin className="w-4 h-4" />
-                  <span>LinkedIn</span>
-                </a>
-              )}
-            </div>
-          </div>
-        )}
+        <PersonContactPanel person={person} />
+
 
         {person.researchedAt && (
           <div className="border-t border-line pt-4 mt-4">
@@ -203,6 +175,7 @@ export default function PersonDetailPage() {
       nextUrl={adjacentPeople?.nextLead ? `/people/${adjacentPeople.nextLead}` : null}
       currentIndex={adjacentPeople?.currentIndex ?? 0}
       totalItems={adjacentPeople?.total ?? 0}
+      titleTransitionName={`person-${person.id}`}
       mainContent={
         <PersonProfileTabs
           personId={person.id}

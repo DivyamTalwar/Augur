@@ -44,6 +44,7 @@ export interface Person {
   emailSource: string | null;
   emailStatus: string | null;
   apolloPersonId: string | null;
+  phone: string | null;
   title: string | null;
   managementLevel: string | null;
   linkedinUrl: string | null;

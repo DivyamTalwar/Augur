@@ -344,6 +344,7 @@ fn run_migrations(conn: &Connection) -> SqliteResult<()> {
         ("email_source", "TEXT"),
         ("email_status", "TEXT"),
         ("apollo_person_id", "TEXT"),
+        ("phone", "TEXT"),
     ];
 
     for (column, definition) in people_columns {

@@ -445,7 +445,9 @@ export type ResearchDepth = "light" | "standard" | "deep";
 
 export interface ApolloKeyStatus {
   configured: boolean;
-  source: "env" | "keychain" | "none" | string;
+  source: "env" | "local" | "keychain" | "none" | string;
+  last4: string | null;
+  keyLength: number | null;
 }
 
 export async function getSettings(): Promise<Settings> {

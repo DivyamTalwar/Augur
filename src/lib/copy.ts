@@ -7,7 +7,7 @@
 export const APP = {
   name: "Augur OS",
   brandTaglineHTML: "Augur <em>OS</em>",
-  modelLabel: "Opus 4.6",
+  modelLabel: "Opus 4.7",
   modelStatus: "live",
 } as const;
 

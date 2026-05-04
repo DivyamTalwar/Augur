@@ -176,8 +176,17 @@ function PersonRow({ person }: { person: PersonWithCompany }) {
     <SelectableRow id={person.id}>
       <StatusIcon className={`w-4 h-4 ${userConfig.color} shrink-0`} />
 
-      <Link to={`/people/${person.id}`} className="flex-1 min-w-0 truncate">
-        <span className="font-medium">{fullName}</span>
+      <Link
+        to={`/people/${person.id}`}
+        viewTransition
+        className="flex-1 min-w-0 truncate"
+      >
+        <span
+          className="font-medium"
+          style={{ viewTransitionName: `person-${person.id}` }}
+        >
+          {fullName}
+        </span>
         {person.title && <span className="text-muted-foreground ml-2">{person.title}</span>}
       </Link>
 

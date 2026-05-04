@@ -184,10 +184,19 @@ function LeadRow({ lead }: { lead: LeadWithScore }) {
     <SelectableRow id={lead.id}>
       <StatusIcon className={`w-4 h-4 ${userConfig.color} shrink-0`} />
 
-      <Link to={`/lead/${lead.id}`} className="flex-1 min-w-0 flex items-center gap-1.5">
+      <Link
+        to={`/lead/${lead.id}`}
+        viewTransition
+        className="flex-1 min-w-0 flex items-center gap-1.5"
+      >
         {lead.companyName && (
           <>
-            <span className="font-medium truncate">{lead.companyName}</span>
+            <span
+              className="font-medium truncate"
+              style={{ viewTransitionName: `lead-${lead.id}` }}
+            >
+              {lead.companyName}
+            </span>
             <IconChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
           </>
         )}

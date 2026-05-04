@@ -24,7 +24,6 @@ import {
 } from "@/components/layout/entity-detail-layout";
 import { useLeadDetail } from "@/lib/hooks/use-leads";
 import { useSettingsStore } from "@/lib/store/settings-store";
-import { useResearchDepthOverrideStore } from "@/lib/store/research-depth-store";
 import type { ResearchDepth } from "@/lib/tauri/commands";
 
 export default function LeadDetailPage() {
@@ -32,12 +31,11 @@ export default function LeadDetailPage() {
   const leadId = parseInt(id || "", 10);
 
   const { lead, score, people, adjacentLeads, isLoading, error } = useLeadDetail(leadId);
-  const defaultResearchDepth = useSettingsStore((state) => state.defaultResearchDepth);
-  const orchestrationEnabled = useSettingsStore((state) => state.orchestrationEnabled);
+  // Single source of truth — sidebar Depth + per-lead dial both read/write the
+  // same `defaultResearchDepth` so the two controls stay perfectly in sync.
+  const researchDepth = useSettingsStore((state) => state.defaultResearchDepth);
   const loadSettings = useSettingsStore((state) => state.loadSettings);
-  const getDepthForLead = useResearchDepthOverrideStore((state) => state.getDepthForLead);
-  const setDepthForLead = useResearchDepthOverrideStore((state) => state.setDepthForLead);
-  const researchDepth = getDepthForLead(leadId, defaultResearchDepth as ResearchDepth);
+  const updateOrchestration = useSettingsStore((state) => state.updateOrchestration);
 
   useEffect(() => {
     loadSettings();
@@ -197,16 +195,15 @@ export default function LeadDetailPage() {
       subtitle={subtitle}
       prevUrl={adjacentLeads?.prevLead ? `/lead/${adjacentLeads.prevLead}` : null}
       nextUrl={adjacentLeads?.nextLead ? `/lead/${adjacentLeads.nextLead}` : null}
+      titleTransitionName={`lead-${lead.id}`}
       currentIndex={adjacentLeads?.currentIndex ?? 0}
       totalItems={adjacentLeads?.total ?? 0}
       mainContent={
         <>
           <ResearchDepthDial
-            value={researchDepth}
-            onChange={(depth) => {
-              setDepthForLead(leadId, depth);
-            }}
-            orchestrationEnabled={orchestrationEnabled}
+            value={researchDepth as ResearchDepth}
+            onChange={(depth) => updateOrchestration({ defaultResearchDepth: depth })}
+            onEnableOrchestration={() => updateOrchestration({ orchestrationEnabled: true })}
           />
           <LeadResearchPanel
             lead={lead}

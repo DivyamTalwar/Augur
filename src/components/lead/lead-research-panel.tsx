@@ -89,8 +89,8 @@ export function LeadResearchPanel({
     return (
       <EmptyState
         icon={IconFileText}
-        title="No research available"
-        description="Research data for this company hasn't been generated yet."
+        title="Ready to research"
+        description="No signals yet for this company. Fire up the orchestrator to start gathering pain points, triggers, and the buyer map."
         action={{
           label: "Start Research",
           loadingLabel: "Researching...",
@@ -165,7 +165,13 @@ export function LeadResearchPanel({
       <div className="min-h-[300px]">
         {activeTab === "company" && <CompanyContent content={companyResearch} />}
         {activeTab === "people" && <PeopleList people={people} />}
-        {activeTab === "score" && <ScoreContent score={score} />}
+        {activeTab === "score" && (
+          <ScoreContent
+            score={score}
+            isScoring={isScoringJobActive}
+            onStartScoring={handleScore}
+          />
+        )}
       </div>
     </div>
   );
@@ -261,13 +267,51 @@ function PeopleList({ people }: { people: Person[] }) {
   );
 }
 
-function ScoreContent({ score }: { score: LeadScore | null | undefined }) {
+function ScoreContent({
+  score,
+  isScoring,
+  onStartScoring,
+}: {
+  score: LeadScore | null | undefined;
+  isScoring: boolean;
+  onStartScoring: () => void;
+}) {
+  if (isScoring) {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 text-center">
+        <div className="relative grid place-items-center w-12 h-12 rounded-full bg-flame/10 mb-5">
+          <span
+            aria-hidden
+            className="absolute inset-0 rounded-full border-2 border-flame/30"
+            style={{ animation: "ring-out 1.8s ease-out infinite" }}
+          />
+          <IconTargetArrow className="w-5 h-5 text-flame animate-pulse" />
+        </div>
+        <h3 className="text-sm font-semibold mb-1">Scoring in progress</h3>
+        <p className="text-sm text-muted-foreground max-w-sm">
+          Reading the company profile against your ICP rubric — tier, requirements, demand
+          signifiers. Watch the dock for live tail.
+        </p>
+      </div>
+    );
+  }
+
   if (!score) {
     return (
-      <SmallEmptyState
-        icon={IconTargetArrow}
-        message="No score data available yet. Score this lead to see the breakdown."
-      />
+      <div className="flex flex-col items-center justify-center py-16 text-center">
+        <div className="grid place-items-center w-12 h-12 rounded-full bg-bg-2 mb-4">
+          <IconTargetArrow className="w-5 h-5 text-muted-foreground" />
+        </div>
+        <h3 className="text-sm font-semibold mb-1">Ready to score this lead</h3>
+        <p className="text-sm text-muted-foreground max-w-sm mb-5">
+          Run the scorer against your active ICP rubric to surface tier, requirement passes,
+          and demand signifiers.
+        </p>
+        <Button onClick={onStartScoring}>
+          <IconTargetArrow className="h-4 w-4" />
+          Score this lead
+        </Button>
+      </div>
     );
   }
 

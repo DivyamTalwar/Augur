@@ -200,12 +200,12 @@ fn init_schema(conn: &Connection) -> SqliteResult<()> {
 
         -- App settings table (single row)
         -- `model` column retained for legacy DB compatibility; jobs always
-        -- invoke `claude-opus-4-6` at xhigh effort (see jobs/queue.rs).
+        -- invoke `claude-opus-4-7` at xhigh effort (see jobs/queue.rs).
         CREATE TABLE IF NOT EXISTS settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            model TEXT NOT NULL DEFAULT 'claude-opus-4-6',
+            model TEXT NOT NULL DEFAULT 'claude-opus-4-7',
             use_chrome INTEGER NOT NULL DEFAULT 0,
-            orchestration_enabled INTEGER NOT NULL DEFAULT 0,
+            orchestration_enabled INTEGER NOT NULL DEFAULT 1,
             default_research_depth TEXT NOT NULL DEFAULT 'light',
             apollo_enabled INTEGER NOT NULL DEFAULT 0,
             apollo_max_contacts INTEGER NOT NULL DEFAULT 10,
@@ -220,7 +220,7 @@ fn init_schema(conn: &Connection) -> SqliteResult<()> {
             apollo_enabled, apollo_max_contacts, deep_job_concurrency,
             daily_budget_usd_cents, updated_at
         )
-        VALUES (1, 'claude-opus-4-6', 0, 0, 'light', 0, 10, 1, NULL, strftime('%s', 'now') * 1000);
+        VALUES (1, 'claude-opus-4-7', 0, 1, 'light', 0, 10, 1, NULL, strftime('%s', 'now') * 1000);
 
         "#,
     )?;
@@ -323,12 +323,16 @@ fn run_migrations(conn: &Connection) -> SqliteResult<()> {
     }
 
     let settings_columns = [
-        ("orchestration_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("orchestration_enabled", "INTEGER NOT NULL DEFAULT 1"),
         ("default_research_depth", "TEXT NOT NULL DEFAULT 'light'"),
         ("apollo_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ("apollo_max_contacts", "INTEGER NOT NULL DEFAULT 10"),
         ("deep_job_concurrency", "INTEGER NOT NULL DEFAULT 1"),
         ("daily_budget_usd_cents", "INTEGER"),
+        // Marker column — when 0, we apply the one-shot v0.2.x default flip below
+        // so existing rows get orchestration_enabled=1. Set to 1 after the flip
+        // so user toggles aren't overwritten on subsequent launches.
+        ("orchestration_default_seeded", "INTEGER NOT NULL DEFAULT 0"),
     ];
 
     for (column, definition) in settings_columns {
@@ -339,6 +343,14 @@ fn run_migrations(conn: &Connection) -> SqliteResult<()> {
             )?;
         }
     }
+
+    // One-shot default flip: enable Specialists by default for users who pre-date
+    // this release. Idempotent via the `orchestration_default_seeded` marker.
+    conn.execute(
+        "UPDATE settings SET orchestration_enabled = 1, orchestration_default_seeded = 1 \
+         WHERE id = 1 AND orchestration_default_seeded = 0",
+        [],
+    )?;
 
     let people_columns = [
         ("email_source", "TEXT"),

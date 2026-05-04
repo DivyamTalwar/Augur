@@ -422,7 +422,7 @@ impl JobQueue {
             };
 
             eprintln!(
-                "[job_queue] job_id={} Using settings: model='claude-opus-4-6', effort='xhigh', use_chrome={}, depth={}",
+                "[job_queue] job_id={} Using settings: model='claude-opus-4-7', effort='xhigh', use_chrome={}, depth={}",
                 job_id,
                 settings.use_chrome,
                 execution_depth.as_str()
@@ -433,7 +433,7 @@ impl JobQueue {
                 entity_id: metadata.entity_id,
                 entity_label: entity_label.clone(),
                 prompt: prompt.clone(),
-                model: Some("claude-opus-4-6".to_string()),
+                model: Some("claude-opus-4-7".to_string()),
                 working_dir: effective_working_dir.clone(),
                 output_path: Some(metadata.primary_output_path.to_string_lossy().to_string()),
             };
@@ -592,6 +592,10 @@ impl JobQueue {
                 "--output-format".to_string(),
                 "stream-json".to_string(),
                 "--verbose".to_string(),
+                // Auto-grant tool permissions (WebSearch, WebFetch, Write, etc.).
+                // Without this, Claude blocks on every tool call → jobs finish
+                // with `permission_denials` and the find-leads JSON never lands.
+                "--dangerously-skip-permissions".to_string(),
             ];
 
             // Add --chrome flag if enabled in settings
@@ -599,9 +603,9 @@ impl JobQueue {
                 args.push("--chrome".to_string());
             }
 
-            // Lock every job to Opus 4.6 at xhigh reasoning effort.
+            // Lock every job to Opus 4.7 at xhigh reasoning effort.
             args.push("--model".to_string());
-            args.push("claude-opus-4-6".to_string());
+            args.push("claude-opus-4-7".to_string());
             args.push("--effort".to_string());
             args.push("xhigh".to_string());
 

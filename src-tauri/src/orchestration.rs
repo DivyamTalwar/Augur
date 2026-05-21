@@ -168,7 +168,9 @@ Rules:
 - Each specialist must return only this compact pointer: `{{"agent":"<name>","status":"completed","path":"outputs/specialists/<name>.json","streamLog":"outputs/specialists/<name>.stream.log"}}`.
 - After every wave, read the JSON artifacts from disk before launching the next wave.
 - The verifier is authoritative for claim acceptance and rejection.
+- The verifier must use the specialist JSON artifacts already on disk. It must not run a second broad web-crawl; blocked, timed-out, or uninspected evidence should be marked weak or rejected so the final files still get written.
 - The final synthesizer writes only the three requested final output files.
+- The synthesizer should produce a concise final profile and must prioritize writing all three final files over adding extra detail.
 - If a subagent is unavailable, complete the same role in the parent session and still save the JSON envelope.
 - Specialist `tools:` frontmatter is a behavior contract, not a security sandbox; the parent Claude process is trusted and may have broader local tool access.
 - Do not place API keys or secrets in any prompt, output file, stream message, or profile.

@@ -23,13 +23,11 @@ A lead-intelligence workspace that turns a cold company name into a fully-resear
 
 <div align="center">
 
-### Watch the 3-minute launch film
+### Watch the launch film
 
-<video src="https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4" poster=".github/assets/launch-film-poster.png" width="720" controls>
-  <a href="https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4"><img src=".github/assets/launch-film-poster.png" alt="Augur OS launch film" width="720" /></a>
-</video>
+[<img src=".github/assets/launch-film-loop.gif" alt="Augur OS launch film" width="760" />](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)
 
-[Open the film in a new tab](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)
+**[▶  Watch the full 3-minute film](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)**
 
 </div>
 

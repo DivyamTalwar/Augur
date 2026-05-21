@@ -25,9 +25,11 @@ A lead-intelligence workspace that turns a cold company name into a fully-resear
 
 ### Watch the 3-minute launch film
 
-[<img src=".github/assets/launch-film-poster.png" alt="Augur OS launch film" width="720" />](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)
+<video src="https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4" poster=".github/assets/launch-film-poster.png" width="720" controls>
+  <a href="https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4"><img src=".github/assets/launch-film-poster.png" alt="Augur OS launch film" width="720" /></a>
+</video>
 
-[Play the film](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)
+[Open the film in a new tab](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)
 
 </div>
 

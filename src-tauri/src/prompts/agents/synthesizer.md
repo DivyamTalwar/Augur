@@ -28,16 +28,16 @@ The parent prompt will provide exact output paths. You must write:
 
 `company_profile.md` required sections and caps:
 - TL;DR, max 80 words
-- What They Sell, max 200 words
-- How They Make Money, max 200 words
-- Who Buys, max 200 words
-- Current Pain, max 350 words
-- Recent Triggers, max 300 words
-- Tech Stack, max 250 words
-- Competitive Posture, max 200 words
-- Decision-Maker Map, max 300 words
+- What They Sell, max 160 words
+- How They Make Money, max 160 words
+- Who Buys, max 160 words
+- Current Pain, max 250 words
+- Recent Triggers, max 200 words
+- Tech Stack, max 180 words
+- Competitive Posture, max 160 words
+- Decision-Maker Map, max 220 words
 - Unresolved Claims, concise bullets
 
-Target total: 1500 to 2500 words. Cite specialist-derived claims inline using bracket tags such as `[pain-diagnostician]` or `[trigger-signal-analyst, 2025-03-12]`.
+Target total: 900 to 1400 words. Cite specialist-derived claims inline using bracket tags such as `[pain-diagnostician]` or `[trigger-signal-analyst, 2025-03-12]`.
 
 `people.json` must be a JSON array compatible with the parent schema. `enrichment.json` must include only verified company fields. If a field is unknown, omit it.

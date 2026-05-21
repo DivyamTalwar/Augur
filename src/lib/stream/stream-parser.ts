@@ -120,6 +120,39 @@ function truncateContent(content: string, maxLength: number = MAX_TOOL_RESULT_LE
   return content.slice(0, maxLength) + `... [truncated ${content.length - maxLength} chars]`;
 }
 
+function sourceUnavailableMessage(content: string): string | null {
+  const statusMatch = content.match(/Request failed with status code (403|404)/i);
+  if (statusMatch) {
+    const reason = statusMatch[1] === "403" ? "blocked by the source" : "not found";
+    return `Source unavailable (${reason}); continuing with other evidence.`;
+  }
+
+  if (/timeout of 60000ms exceeded/i.test(content)) {
+    return "Source unavailable (fetch timed out); continuing with other evidence.";
+  }
+
+  return null;
+}
+
+function parseToolResultStatus(isError: boolean | undefined, content: string, timestamp: number): LogEntry {
+  if (isError) {
+    const sourceMessage = sourceUnavailableMessage(content);
+    if (sourceMessage) {
+      return {
+        type: "info",
+        content: sourceMessage,
+        timestamp,
+      };
+    }
+  }
+
+  return {
+    type: isError ? "error" : "tool_result",
+    content: truncateContent(content),
+    timestamp,
+  };
+}
+
 // Map raw Claude model IDs → friendly display labels surfaced in the dock.
 function humanizeModelLabel(raw: unknown): string {
   const id = typeof raw === "string" ? raw : "";
@@ -234,11 +267,11 @@ function parseToolResult(event: ClaudeStreamEvent, timestamp: number): LogEntry 
   }
 
   const toolResultEvent = event as { is_error?: boolean; output?: string };
-  return {
-    type: toolResultEvent.is_error ? "error" : "tool_result",
-    content: truncateContent(toolResultEvent.output || "Tool completed"),
-    timestamp,
-  };
+  return parseToolResultStatus(
+    toolResultEvent.is_error,
+    toolResultEvent.output || "Tool completed",
+    timestamp
+  );
 }
 
 function parseUserEvent(event: ClaudeStreamEvent, timestamp: number): LogEntry[] {
@@ -267,11 +300,7 @@ function parseUserEvent(event: ClaudeStreamEvent, timestamp: number): LogEntry[]
             continue;
           }
 
-          entries.push({
-            type: block.is_error ? "error" : "tool_result",
-            content: truncateContent(contentStr),
-            timestamp,
-          });
+          entries.push(parseToolResultStatus(block.is_error, contentStr, timestamp));
         }
       }
     }
@@ -444,6 +473,11 @@ export function parseRawOutput(text: string): LogEntry | null {
   const timestamp = Date.now();
   const trimmed = text.trim();
   if (!trimmed) return null;
+
+  const sourceMessage = sourceUnavailableMessage(trimmed);
+  if (sourceMessage) {
+    return { type: "info", content: sourceMessage, timestamp };
+  }
 
   if (/^error:/i.test(trimmed) || /exception|traceback/i.test(trimmed)) {
     return { type: "error", content: trimmed, timestamp };

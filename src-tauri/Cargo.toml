@@ -4,8 +4,8 @@ version = "0.2.1"
 edition = "2021"
 description = "Lead research and signal scoring system"
 authors = [""]
-license = ""
-repository = ""
+license = "Apache-2.0"
+repository = "https://github.com/DivyamTalwar/Augur"
 default-run = "augur-os"
 
 [lib]

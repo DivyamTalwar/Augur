@@ -13,6 +13,7 @@ A local-first lead-intelligence workspace that turns a cold company name into a 
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-stable-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev)
+[![Connect on LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0A66C2?style=flat-square&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/divyam-talwar-b68192216/)
 
 </div>
 
@@ -24,7 +25,7 @@ A local-first lead-intelligence workspace that turns a cold company name into a 
 
 [<img src=".github/assets/launch-film-loop.gif" alt="Augur OS launch film" width="760" />](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)
 
-**[▶  Watch the full 3-minute film](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)**
+**[▶ Watch the full 3-minute film](https://github.com/DivyamTalwar/Augur/releases/download/v0.2.1/augur-film.mp4)**
 
 </div>
 
@@ -53,7 +54,7 @@ Augur OS is a desktop application for B2B account research and signal-based lead
 
 What sets it apart is discipline. Augur does not just generate a plausible-sounding summary. A dedicated verification stage audits every claim against the source it came from and drops anything it cannot support, so the profiles you read are grounded in evidence you can open and check yourself.
 
-Augur runs as a native desktop app built with React 19, TypeScript, Tauri 2, Rust, and SQLite. Your research, your scores, and your pipeline live in a local database on your own machine. Nothing is uploaded to an Augur server, because there is no Augur server.
+Augur runs as a native desktop app built with React 19, TypeScript, Tauri 2, Rust, and SQLite. Your research, your scores, and your pipeline live in a local database on your own machine. Nothing is uploaded to an Augur server. There is no Augur server.
 
 ## The problem
 
@@ -133,7 +134,7 @@ Augur OS attacks all three problems at once: it does the research fast, it groun
 
 ## How it works
 
-Augur runs each company through a multi-stage research pipeline. The pipeline is built around a simple principle: many specialists research in parallel, an auditor checks their work, and only verified findings make it into the final profile.
+Augur runs each company through a multi-stage research pipeline. The pipeline is built around one principle: many specialists research in parallel, an auditor checks their work, and only verified findings reach the final profile.
 
 ### The orchestrator
 
@@ -294,10 +295,10 @@ src-tauri/src/                # Rust backend
 
 Before you build Augur OS, install the following:
 
-- **[Bun](https://bun.sh)** — the package manager and script runner for the front end.
-- **[Rust](https://www.rust-lang.org/tools/install)** — the stable toolchain, used to build the Tauri core.
-- **[Claude CLI](https://claude.ai/code)** — the research engine, with API access configured.
-- **Platform build dependencies for Tauri 2** — system libraries vary by operating system. Follow the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) for macOS, Windows, or Linux before your first build.
+- **[Bun](https://bun.sh)**: the package manager and script runner for the front end.
+- **[Rust](https://www.rust-lang.org/tools/install)**: the stable toolchain, used to build the Tauri core.
+- **[Claude CLI](https://claude.ai/code)**: the research engine, with API access configured.
+- **Platform build dependencies for Tauri 2**: system libraries vary by operating system. Follow the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) for macOS, Windows, or Linux before your first build.
 
 Confirm the Claude CLI runs from your terminal before starting Augur, since the research pipeline spawns it directly.
 
@@ -370,6 +371,6 @@ Augur OS is released under the [Apache License 2.0](LICENSE). Copyright 10XU Inc
 
 **Augur reads the signals. You close the deal.**
 
-Built by 10XU Inc.
+Built by [Divyam Talwar](https://www.linkedin.com/in/divyam-talwar-b68192216/) at 10XU Inc.
 
 </div>
